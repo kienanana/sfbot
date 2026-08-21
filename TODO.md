@@ -11,7 +11,7 @@ acceptable.
 - [x] Document local and homelab run commands.
 - [x] Document the one-bot, single-instance testing workflow.
 - [x] Confirm `.env` and `data/` are ignored by Git.
-- [ ] Add `make run`, `make test`, and `make logs` commands.
+- [x] Add `make run`, `make test`, and `make logs` commands.
 
 ## P0 — Runtime reliability
 

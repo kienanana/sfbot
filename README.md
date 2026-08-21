@@ -28,18 +28,18 @@ Telegram permits only one active `getUpdates` poller per bot.
 
 ## Run locally
 
-Python 3.11 or newer is recommended. The bot has no third-party runtime
+Python 3.11 or newer and Make are required. The bot has no third-party runtime
 dependencies. From the repository root, run:
 
 ```sh
-(set -a; source .env; set +a; python3 -m sfbot)
+make run
 ```
 
 If the Python.org macOS installation reports `CERTIFICATE_VERIFY_FAILED`, use
 the installed `certifi` bundle:
 
 ```sh
-(set -a; source .env; set +a; SSL_CERT_FILE="$(python3 -m certifi)" python3 -m sfbot)
+SSL_CERT_FILE="$(python3.11 -m certifi)" make run
 ```
 
 Stop the bot with `Ctrl+C`. The local cache is stored at `data/sfbot.db`.
@@ -47,7 +47,20 @@ Stop the bot with `Ctrl+C`. The local cache is stored at `data/sfbot.db`.
 Run the tests with:
 
 ```sh
-python3 -m unittest discover -s tests -v
+make test
+```
+
+Run the complete local check, including bytecode compilation, with:
+
+```sh
+make check
+```
+
+The Makefile uses `python3.11` by default. Override it when using another
+supported interpreter:
+
+```sh
+make check PYTHON=python3.12
 ```
 
 ## Run on the homelab
@@ -62,7 +75,7 @@ After cloning the repository, create `.env` as shown above and run:
 chmod 600 .env
 docker compose up -d --build
 docker compose ps
-docker compose logs --tail=100 sfbot
+make logs
 ```
 
 Docker's `restart: unless-stopped` policy restarts the bot after a crash or host
@@ -74,7 +87,7 @@ To deploy a new revision:
 ```sh
 git pull
 docker compose up -d --build
-docker compose logs --tail=100 sfbot
+make logs
 ```
 
 ## One-bot development workflow
@@ -86,7 +99,8 @@ test, stop production on the homelab:
 docker compose stop sfbot
 ```
 
-Run and stop the bot locally, then restore production on the homelab:
+Run the bot locally with `make run`, stop it with `Ctrl+C`, then restore
+production on the homelab:
 
 ```sh
 docker compose start sfbot
