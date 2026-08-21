@@ -30,8 +30,8 @@ acceptable.
 - [ ] Test messages containing multiple distinct and repeated tweet links.
 - [ ] Test the exact five-day expiration boundary.
 - [ ] Test graceful shutdown and database closure.
-- [ ] Add GitHub Actions to run tests and bytecode compilation.
-- [ ] Build the Docker image in CI.
+- [x] Add GitHub Actions to run tests and bytecode compilation.
+- [x] Build the Docker image in CI.
 
 ## P1 — Homelab deployment
 
