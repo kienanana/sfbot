@@ -1,0 +1,14 @@
+services:
+  sfbot:
+    build: .
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      SFBOT_DB_PATH: /data/sfbot.db
+      SFBOT_RETENTION_DAYS: 5
+    volumes:
+      - sfbot-data:/data
+
+volumes:
+  sfbot-data:
+
