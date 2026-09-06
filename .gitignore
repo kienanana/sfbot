@@ -4,4 +4,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 data/
+build/
+*.egg-info/
+.coverage
 

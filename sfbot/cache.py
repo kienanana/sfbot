@@ -41,6 +41,28 @@ class DuplicateCache:
         self._connection.execute(
             "CREATE INDEX IF NOT EXISTS tweet_origins_seen_at ON tweet_origins (seen_at)"
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS replied_messages (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                tweet_id TEXT NOT NULL,
+                seen_at INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, message_id, tweet_id)
+            ) WITHOUT ROWID
+            """
+        )
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS replied_messages_seen_at ON replied_messages (seen_at)"
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS bot_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) WITHOUT ROWID
+            """
+        )
         self._connection.commit()
 
     def find_or_record(
@@ -59,6 +81,7 @@ class DuplicateCache:
 
         with self._lock, self._connection:
             self._connection.execute("DELETE FROM tweet_origins WHERE seen_at < ?", (cutoff,))
+            self._connection.execute("DELETE FROM replied_messages WHERE seen_at < ?", (cutoff,))
             row = self._connection.execute(
                 """
                 SELECT message_id, seen_at
@@ -86,6 +109,55 @@ class DuplicateCache:
                     (chat_id, tweet_id, message_id, seen_at),
                 )
             return None
+
+    def has_replied(self, *, chat_id: int, message_id: int, tweet_id: str) -> bool:
+        """Return True if a duplicate reply was already sent for this share."""
+
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                """
+                SELECT 1 FROM replied_messages
+                WHERE chat_id = ? AND message_id = ? AND tweet_id = ?
+                """,
+                (chat_id, message_id, tweet_id),
+            ).fetchone()
+            return row is not None
+
+    def record_reply(
+        self, *, chat_id: int, message_id: int, tweet_id: str, seen_at: int
+    ) -> None:
+        """Record that a duplicate reply was sent to prevent duplicate replies on update replay."""
+
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT OR REPLACE INTO replied_messages (chat_id, message_id, tweet_id, seen_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (chat_id, message_id, tweet_id, seen_at),
+            )
+
+    def get_last_update_id(self) -> int | None:
+        """Return the last successfully processed Telegram update ID, if any."""
+
+        with self._lock, self._connection:
+            row = self._connection.execute(
+                "SELECT value FROM bot_state WHERE key = 'last_update_id'"
+            ).fetchone()
+            return int(row[0]) if row is not None else None
+
+    def set_last_update_id(self, update_id: int) -> None:
+        """Persist the last successfully processed Telegram update ID."""
+
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT OR REPLACE INTO bot_state (key, value)
+                VALUES ('last_update_id', ?)
+                """,
+                (str(update_id),),
+            )
+
 
     def replace_origin(
         self, *, chat_id: int, tweet_id: str, old_message_id: int, new_message_id: int, seen_at: int

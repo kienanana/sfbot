@@ -8,6 +8,16 @@ services:
       SFBOT_RETENTION_DAYS: 5
     volumes:
       - sfbot-data:/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 128M
 
 volumes:
   sfbot-data:

@@ -15,21 +15,21 @@ acceptable.
 
 ## P0 — Runtime reliability
 
-- [ ] Persist the last successfully processed Telegram update ID in SQLite.
-- [ ] Prevent a replayed duplicate update from sending a second `sf` response.
-- [ ] Isolate failures per update so one malformed message cannot stop polling.
-- [ ] Handle `SIGINT` and `SIGTERM` cleanly and close SQLite before exiting.
-- [ ] Verify transient Telegram and network failures retry the pending update.
-- [ ] Report a clear startup error if a Telegram webhook is already configured.
-- [ ] Keep logs useful without exposing the bot token or message text.
+- [x] Persist the last successfully processed Telegram update ID in SQLite.
+- [x] Prevent a replayed duplicate update from sending a second `sf` response.
+- [x] Isolate failures per update so one malformed message cannot stop polling.
+- [x] Handle `SIGINT` and `SIGTERM` cleanly and close SQLite before exiting.
+- [x] Verify transient Telegram and network failures retry the pending update.
+- [x] Report a clear startup error if a Telegram webhook is already configured.
+- [x] Keep logs useful without exposing the bot token or message text.
 
 ## P1 — Automated checks
 
-- [ ] Test polling offsets and restart/replay behavior.
-- [ ] Test Telegram API errors and network retry behavior.
-- [ ] Test messages containing multiple distinct and repeated tweet links.
-- [ ] Test the exact five-day expiration boundary.
-- [ ] Test graceful shutdown and database closure.
+- [x] Test polling offsets and restart/replay behavior.
+- [x] Test Telegram API errors and network retry behavior.
+- [x] Test messages containing multiple distinct and repeated tweet links.
+- [x] Test the exact five-day expiration boundary.
+- [x] Test graceful shutdown and database closure.
 - [x] Add GitHub Actions to run tests and bytecode compilation.
 - [x] Build the Docker image in CI.
 
@@ -40,8 +40,9 @@ acceptable.
 - [ ] Clone the repository and create the production `.env` securely.
 - [ ] Deploy exactly one `sfbot` container.
 - [ ] Confirm Docker starts at boot and `restart: unless-stopped` works.
-- [ ] Add Docker log rotation and reasonable CPU/memory limits.
+- [x] Add Docker log rotation and reasonable CPU/memory limits.
 - [ ] Perform and document one deployment and rollback.
+
 
 ## P2 — Lightweight operations
 

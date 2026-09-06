@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
+import threading
 from pathlib import Path
 
 from .cache import DuplicateCache
@@ -32,8 +34,19 @@ def main() -> None:
     poll_timeout = _positive_int("SFBOT_POLL_TIMEOUT", 30)
     database_path = Path(os.environ.get("SFBOT_DB_PATH", "data/sfbot.db"))
 
+    stop_event = threading.Event()
+
+    def _on_signal(signum: int, _frame: object) -> None:
+        logging.getLogger("sfbot").info("Received signal %s; stopping cleanly...", signum)
+        stop_event.set()
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
+
     with DuplicateCache(database_path, retention_seconds=retention_days * 24 * 60 * 60) as cache:
-        run_polling(TelegramClient(token), cache, poll_timeout=poll_timeout)
+        run_polling(TelegramClient(token), cache, poll_timeout=poll_timeout, stop_event=stop_event)
+
 
 
 if __name__ == "__main__":

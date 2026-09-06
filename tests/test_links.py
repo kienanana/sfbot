@@ -30,6 +30,22 @@ class TweetIdFromUrlTests(unittest.TestCase):
         }
         self.assertEqual(extract_tweet_ids(message), ["11", "22", "33"])
 
+    def test_multiple_distinct_and_repeated_links(self) -> None:
+        message = {
+            "text": (
+                "Post 1: https://twitter.com/user/status/100 and again https://x.com/user/status/100?s=20\n"
+                "Post 2: https://x.com/user2/status/200\n"
+                "Post 3: http://mobile.twitter.com/user3/status/300/photo/1"
+            ),
+            "entities": [
+                {"type": "text_link", "url": "https://x.com/i/status/100"},
+                {"type": "text_link", "url": "https://twitter.com/i/status/400"},
+            ],
+            "caption": "Duplicate caption https://x.com/user/status/200",
+        }
+        self.assertEqual(extract_tweet_ids(message), ["100", "200", "300", "400"])
+
+
 
 if __name__ == "__main__":
     unittest.main()
