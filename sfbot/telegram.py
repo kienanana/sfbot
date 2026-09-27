@@ -114,7 +114,7 @@ def _callout(action_word: str, display_name: str) -> list[str]:
 
     handle = "".join(display_name.split())
     return [
-        f"Uh oh! Looks like {display_name}'s getting *{action_word}ed*",
+        f"Uh oh! Looks like {display_name}'s getting *{action_word}d*",
         f"Let's drop a /{action_word}{handle}",
     ]
 
