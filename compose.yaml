@@ -9,6 +9,7 @@ services:
       SFBOT_LEADERBOARD_CHAT_ID: ${SFBOT_LEADERBOARD_CHAT_ID}
       SFBOT_UTC_OFFSET_MINUTES: 480
       SFBOT_LEADERBOARD_AT: "21:00"
+      SFBOT_ACTION_WORD: ${SFBOT_ACTION_WORD:-}
     volumes:
       - sfbot-data:/data
 
