@@ -7,14 +7,16 @@ the group gets one leaderboard a day instead of everyone's share text.
 ## Repeated links
 
 `sfbot` watches a Telegram group for Twitter/X status links. If the same post
-was shared in that chat during the previous five days, it sends `sf` as a reply
-to the first message so tapping the reply navigates to the original share.
+was shared in that chat during the previous five days, it sends `sf @username`
+as a reply to the first message. The mention names the person who shared the
+duplicate; tapping the reply navigates to the original share. People without a
+username get a clickable name mention instead.
 
 Setting `SFBOT_ACTION_WORD` adds a callout naming whoever reposted. With
 `SFBOT_ACTION_WORD=Nuke`, Alice sharing a post and Bob resharing it gets:
 
 ```
-sf                                          (a reply to Alice's message)
+sf @Bob                                     (a reply to Alice's message)
 Uh oh! Looks like Bob's getting *Nuked*
 Let's drop a /NukeBob
 ```
@@ -30,8 +32,9 @@ indexed SQLite database and scoped per Telegram chat.
 
 ## Architecture
 
-One process, one SQLite file, no inbound network. Every message takes exactly
-one of three paths, and the daily post is checked once per polling cycle.
+One process, one SQLite file, no inbound network. Commands, repeated links, and
+game results are handled as separate paths; the daily post is checked once per
+polling cycle.
 
 ```mermaid
 flowchart TD
@@ -42,24 +45,27 @@ flowchart TD
     Z2 --> C
     Z -->|no| C
 
-    C{"/leaderboard?"}
-    C -->|yes| D{"on the roster?"}
-    D -->|no| D2["ask them to say<br/>something in the group"]
-    D -->|yes| D3["read the group's standings"]
+    C{"/games or /leaderboard?"}
+    C -->|/games| D4["send links to all supported games"]
+    C -->|/leaderboard| D{"where asked?"}
+    D -->|board group or member DM| D3["read the group's standings"]
+    D -->|unknown DM| D2["ask them to say<br/>something in the group"]
+    D -->|other group| M
     D3 --> E["answer in the chat that asked<br/>a DM check stays private"]
 
     C -->|no| F{"Twitter/X link?"}
     F -->|yes| G["find_or_record<br/>per status ID"]
     G --> H{"shared in the last 5 days?"}
-    H -->|yes| I["reply 'sf' to the original"]
+    H -->|yes| I["reply 'sf @sharer' to the original"]
     H -->|no| J["stored as the origin"]
 
     F -->|no| K["parse_result"]
     K --> L{"a game we know?"}
     L -->|no| M["ignored"]
-    L -->|yes| L2{"on the roster?"}
-    L2 -->|no| D2
-    L2 -->|yes| N["record against<br/>the group's board"]
+    L -->|yes| L2{"where submitted?"}
+    L2 -->|unknown DM| D2
+    L2 -->|other group| M
+    L2 -->|board group or member DM| N["record against<br/>the group's board"]
     N --> O{"first one today?"}
     O -->|yes| P["DM: 'Recorded Wordle 1412 - 3/6'<br/>group: react 👍"]
     O -->|no| Q["DM: 'You already submitted'<br/>group: silence"]
@@ -71,8 +77,7 @@ flowchart TD
     U -->|yes| V["DM each member<br/>the games they still owe"]
 ```
 
-Results reach the board from members' DMs, so the group itself stays quiet
-until the daily post.
+Members can submit results by DM without posting their share text to the group.
 
 ## Prerequisites
 
@@ -88,8 +93,8 @@ SFBOT_ACTION_WORD=Nuke
 
 `SFBOT_LEADERBOARD_CHAT_ID` is the group the daily leaderboard posts to; see
 [Finding the group's chat ID](#finding-the-groups-chat-id). Leave it out to run
-link deduplication alone. `SFBOT_ACTION_WORD` is the repeat-poster callout verb;
-leave it out to reply with `sf` alone.
+link deduplication and `/games` without the leaderboard. `SFBOT_ACTION_WORD` is
+the repeat-poster callout verb; leave it out to send only the `sf` mention.
 
 `compose.yaml` passes each of these into the container by name, so a new
 variable has to be added there as well as to `.env`.
@@ -136,7 +141,7 @@ make check PYTHON=python3.12
 
 ## Run on the homelab
 
-The production instance runs as one Docker container on the group's homelab.
+Run the production instance as one Docker container on the group's homelab.
 It uses Telegram long polling, so the host needs outbound HTTPS access but no
 domain, reverse proxy, port forwarding, or inbound port.
 
@@ -183,8 +188,9 @@ bot's short, non-critical five-day history.
 
 ## Daily games leaderboard
 
-Results go to the bot in a direct message, never to the group. The group only
-ever sees one message a day: the leaderboard itself.
+Send results to the bot in a direct message to keep share text out of the group.
+The scheduled leaderboard adds one group message on days with results; group
+commands and repeated-link replies can also produce messages there.
 
 Send the bot a DM containing a game's share text and it replies with what it
 recorded:
@@ -204,11 +210,14 @@ out. Unlike the post itself, a reminder missed while the bot was down is dropped
 rather than sent late, since a warning about a board that has already gone up is
 worse than none.
 
-At 21:00 SGT the bot posts the day's boards to the group. Each game gets its own
-board, ordered best result first; there is no combined points table. Anyone can
-also ask for the standings early with `/leaderboard`, which answers in whichever
-chat it was sent from — in a DM that keeps the check private, in the group it
-posts for everyone.
+At or after 21:00 SGT, the bot posts the day's boards to the group once results
+exist. Each game and puzzle number gets its own board, ordered best result first;
+there is no combined points table. Results submitted after the post still appear
+in `/leaderboard`, but the group post is not updated. Use `/leaderboard` to ask
+for standings early. It replies in the chat where you ask, so a DM check stays
+private and a group check is visible to everyone. Each game heading has its own
+emoji, and the player or players in first place get a 👑. Use `/games` in either
+chat for links to all supported games.
 
 Pasting a result into the group still works and still counts, acknowledged with
 a 👍 rather than a reply. It just defeats the point.
@@ -232,8 +241,8 @@ make logs
 #     chat ID. This chat's ID is -1001234567890
 ```
 
-Put that value in `.env` and restart. Until it is set, the leaderboard is off
-entirely and the bot only does link deduplication.
+Put that value in `.env` and restart. Until it is set, the leaderboard is off;
+link deduplication and `/games` still work.
 
 ### Who may submit
 
@@ -258,8 +267,8 @@ group's member list and pressing Start is enough.
 ### Adding a game
 
 Wordle, Connections, Krillion, and Fermi ship today. To add another, write a
-parser in `sfbot/games.py` that returns a `ParsedResult` (or `None`) and add it
-to the `GAMES` tuple:
+parser in `sfbot/games.py` that returns a `ParsedResult` (or `None`) and add a
+`Game` entry with its name, emoji, URL, and parser to the `GAMES` tuple:
 
 - `puzzle_id` identifies the day's puzzle and is shown in the board heading.
 - `score` is the text shown to players, for example `3/6`.
@@ -282,11 +291,13 @@ not match, and add cases to `tests/test_games.py` from real share text.
 | `SFBOT_LEADERBOARD_CHAT_ID` | Unset | Group the leaderboard posts to; unset disables the feature |
 | `SFBOT_UTC_OFFSET_MINUTES` | `480` | Local day boundary for the leaderboard (480 = SGT) |
 | `SFBOT_LEADERBOARD_AT` | `21:00` | Local time of the daily post; `off` for `/leaderboard` only |
-| `SFBOT_ACTION_WORD` | Unset | Verb for the repeat-poster callout; unset sends `sf` alone |
+| `SFBOT_ACTION_WORD` | Unset | Verb for the repeat-poster callout; unset sends only the `sf` mention |
 
 ## Behavior details
 
 - Deduplication is per Telegram chat, not global across every group.
+- Game submissions and `/leaderboard` in groups are accepted only in the
+  configured leaderboard group. Members of that group can also use DMs.
 - The earliest share remains the reply target for the five-day window.
 - If the original message was deleted, the current share becomes the new
   origin without sending an orphaned `sf` reply.

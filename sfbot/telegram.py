@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .cache import DuplicateCache
-from .games import GAME_NAMES, parse_result
+from .games import GAMES, parse_result
 from .leaderboard import LeaderboardStore, format_standings
 from .links import extract_tweet_ids
 from .times import due_post_date, due_reminder_date, local_date
@@ -19,6 +19,7 @@ from .times import due_post_date, due_reminder_date, local_date
 LOG = logging.getLogger(__name__)
 
 _LEADERBOARD_COMMAND = "/leaderboard"
+_GAMES_COMMAND = "/games"
 _ACKNOWLEDGEMENT = "\N{THUMBS UP SIGN}"
 _UNKNOWN_SENDER = (
     "I don't have you on the group roster yet. Say anything in the group chat,"
@@ -74,22 +75,61 @@ class TelegramClient:
         result = self._call("getUpdates", payload, timeout=poll_timeout + 10)
         return result if isinstance(result, list) else []
 
-    def send_reply(self, *, chat_id: int, message_id: int, text: str) -> None:
+    def send_sf_reply(
+        self, *, chat_id: int, message_id: int, sender: Mapping[str, object] | None
+    ) -> None:
+        text = "sf"
+        entities: list[dict[str, object]] = []
+        if sender is not None and isinstance(sender.get("id"), int):
+            username = sender.get("username")
+            if isinstance(username, str) and username:
+                text += f" @{username}"
+            else:
+                name = sender.get("first_name")
+                if not isinstance(name, str) or not name:
+                    name = str(sender["id"])
+                mention = f"@{name}"
+                text += f" {mention}"
+                entities.append(
+                    {
+                        "type": "text_mention",
+                        "offset": 3,
+                        "length": _utf16_length(mention),
+                        "user": {
+                            "id": sender["id"],
+                            "is_bot": bool(sender.get("is_bot", False)),
+                            "first_name": name,
+                        },
+                    }
+                )
+
+        payload: dict[str, object] = {
+            "chat_id": chat_id,
+            "text": text,
+            "reply_parameters": {
+                "message_id": message_id,
+                "allow_sending_without_reply": False,
+            },
+        }
+        if entities:
+            payload["entities"] = entities
         self._call(
             "sendMessage",
-            {
-                "chat_id": chat_id,
-                "text": text,
-                "reply_parameters": {
-                    "message_id": message_id,
-                    "allow_sending_without_reply": False,
-                },
-            },
+            payload,
             timeout=20,
         )
 
-    def send_message(self, *, chat_id: int, text: str) -> None:
-        self._call("sendMessage", {"chat_id": chat_id, "text": text}, timeout=20)
+    def send_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        entities: list[dict[str, object]] | None = None,
+    ) -> None:
+        payload: dict[str, object] = {"chat_id": chat_id, "text": text}
+        if entities:
+            payload["entities"] = entities
+        self._call("sendMessage", payload, timeout=20)
 
     def set_message_reaction(
         self, *, chat_id: int, message_id: int, emoji: str
@@ -125,6 +165,29 @@ def _message_body(message: Mapping[str, object]) -> str:
         if isinstance(body, str):
             return body
     return ""
+
+
+def _utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _games_message() -> tuple[str, list[dict[str, object]]]:
+    """Build a game list with links on the names and Telegram-safe offsets."""
+
+    text = "Games:"
+    entities: list[dict[str, object]] = []
+    for game in GAMES:
+        prefix = f"\n{game.emoji} "
+        entities.append(
+            {
+                "type": "text_link",
+                "offset": _utf16_length(text + prefix),
+                "length": _utf16_length(game.name),
+                "url": game.url,
+            }
+        )
+        text += prefix + game.name
+    return text, entities
 
 
 def _leading_command(message: Mapping[str, object]) -> str | None:
@@ -260,21 +323,30 @@ def handle_message(
     message_id = int(message["message_id"])
     seen_at = int(message.get("date", time.time()))
     is_private = chat.get("type") == "private"
+    is_board_group = board_chat_id is not None and chat_id == board_chat_id
     sender = _sender(message)
 
     # Anything said in the group proves membership, which is what later lets a
     # direct message be trusted. Group Privacy is off, so ordinary chatter counts
     # and nobody has to post a result in the group to get on the roster.
-    if board_chat_id is not None and chat_id == board_chat_id and sender is not None:
+    if is_board_group and sender is not None:
         store.remember_member(chat_id=board_chat_id, user_id=sender[0], seen_at=seen_at)
 
-    if _leading_command(message) == _LEADERBOARD_COMMAND:
+    command = _leading_command(message)
+    if command == _GAMES_COMMAND:
+        text, entities = _games_message()
+        client.send_message(chat_id=chat_id, text=text, entities=entities)
+        return
+
+    if command == _LEADERBOARD_COMMAND:
         if board_chat_id is None:
             LOG.warning(
                 "Ignoring /leaderboard: set SFBOT_LEADERBOARD_CHAT_ID to the group's"
                 " chat ID. This chat's ID is %s",
                 chat_id,
             )
+            return
+        if not is_private and not is_board_group:
             return
         if is_private and not (
             sender is not None
@@ -295,7 +367,7 @@ def handle_message(
 
     tweet_ids = extract_tweet_ids(message)
     if not tweet_ids:
-        if board_chat_id is not None:
+        if board_chat_id is not None and (is_private or is_board_group):
             _record_submission(
                 message,
                 store=store,
@@ -320,8 +392,11 @@ def handle_message(
             continue
 
         try:
-            client.send_reply(
-                chat_id=chat_id, message_id=original.message_id, text="sf"
+            sender_data = message.get("from")
+            client.send_sf_reply(
+                chat_id=chat_id,
+                message_id=original.message_id,
+                sender=sender_data if isinstance(sender_data, Mapping) else None,
             )
         except TelegramAPIError as error:
             description = error.description.lower()
@@ -406,7 +481,7 @@ def send_due_reminders(
     submitted = store.submitted_games(chat_id=board_chat_id, local_date=day)
     for user_id in store.members(chat_id=board_chat_id):
         played = submitted.get(user_id, frozenset())
-        missing = [game for game in GAME_NAMES if game not in played]
+        missing = [game.name for game in GAMES if game.name not in played]
         if not missing:
             continue
         try:

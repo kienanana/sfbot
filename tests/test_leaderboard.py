@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from sfbot.games import ParsedResult
-from sfbot.leaderboard import LeaderboardStore, format_standings
+from sfbot.leaderboard import Entry, GameStandings, LeaderboardStore, format_standings
 
 DAY = "2033-05-18"
 
@@ -56,6 +56,17 @@ class LeaderboardStoreTests(unittest.TestCase):
         boards = self.store.standings(chat_id=-100, local_date=DAY)
         self.assertEqual([board.game for board in boards], ["Connections", "Wordle"])
 
+    def test_different_puzzles_on_the_same_day_have_separate_boards(self) -> None:
+        self.record("Alice", wordle("4/6", 4), user_id=5)
+        next_puzzle = ParsedResult(
+            game="Wordle", puzzle_id="1235", score="2/6", rank_key=2
+        )
+        self.record("Bob", next_puzzle, user_id=6)
+
+        boards = self.store.standings(chat_id=-100, local_date=DAY)
+        self.assertEqual([board.puzzle_id for board in boards], ["1234", "1235"])
+        self.assertEqual([board.entries[0].display_name for board in boards], ["Alice", "Bob"])
+
     def test_failures_sort_last_and_ties_share_a_placement(self) -> None:
         self.record("Alice", wordle("X/6", 7), user_id=5, submitted_at=2_000_000_000)
         self.record("Bob", wordle("3/6", 3), user_id=6, submitted_at=2_000_000_010)
@@ -66,8 +77,8 @@ class LeaderboardStoreTests(unittest.TestCase):
         )
         self.assertEqual(
             text,
-            "Daily games - 2033-05-18\n\nWordle 1234\n"
-            "1. Bob - 3/6\n1. Cara - 3/6\n3. Alice - X/6",
+            "Daily games - 2033-05-18\n\n🆆 Wordle 1234\n"
+            "1. 👑 Bob - 3/6\n1. 👑 Cara - 3/6\n3. Alice - X/6",
         )
 
     def test_chats_have_independent_boards(self) -> None:
@@ -110,6 +121,26 @@ class FormatStandingsTests(unittest.TestCase):
             format_standings([], local_date=DAY),
             "No daily game results for 2033-05-18 yet.",
         )
+
+    def test_each_game_heading_has_its_emoji(self) -> None:
+        boards = [
+            GameStandings(
+                game=name,
+                puzzle_id="42",
+                entries=(Entry(display_name="Alice", score="1", rank_key=1),),
+            )
+            for name in ("Connections", "Fermi", "Krillion", "Wordle")
+        ]
+        text = format_standings(boards, local_date=DAY)
+
+        for heading in (
+            "🧩 Connections 42",
+            "🧮 Fermi 42",
+            "🦐 Krillion 42",
+            "🆆 Wordle 42",
+        ):
+            self.assertIn(heading, text)
+        self.assertEqual(text.count("1. 👑 Alice - 1"), 4)
 
 
 if __name__ == "__main__":

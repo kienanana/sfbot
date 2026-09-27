@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from itertools import groupby
 from pathlib import Path
 
-from .games import ParsedResult
+from .games import GAME_BY_NAME, ParsedResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +172,7 @@ class LeaderboardStore:
         return cursor.rowcount == 1
 
     def standings(self, *, chat_id: int, local_date: str) -> list[GameStandings]:
-        """Return one board per game, each ordered best result first."""
+        """Return one board per game and puzzle, ordered best result first."""
 
         with self._lock:
             rows = self._connection.execute(
@@ -180,18 +180,20 @@ class LeaderboardStore:
                 SELECT game, puzzle_id, display_name, score, rank_key
                 FROM game_results
                 WHERE chat_id = ? AND local_date = ?
-                ORDER BY game, rank_key, submitted_at
+                ORDER BY game, puzzle_id, rank_key, submitted_at
                 """,
                 (chat_id, local_date),
             ).fetchall()
 
         boards: list[GameStandings] = []
-        for game, game_rows in groupby(rows, key=lambda row: row[0]):
+        for (game, puzzle_id), game_rows in groupby(
+            rows, key=lambda row: (row[0], row[1])
+        ):
             grouped = list(game_rows)
             boards.append(
                 GameStandings(
                     game=str(game),
-                    puzzle_id=str(grouped[0][1]),
+                    puzzle_id=str(puzzle_id),
                     entries=tuple(
                         Entry(
                             display_name=str(row[2]),
@@ -276,7 +278,9 @@ def format_standings(standings: list[GameStandings], *, local_date: str) -> str:
     lines = [f"Daily games - {local_date}"]
     for board in standings:
         lines.append("")
-        lines.append(f"{board.game} {board.puzzle_id}")
+        game = GAME_BY_NAME.get(board.game)
+        heading = f"{game.emoji} {board.game}" if game is not None else board.game
+        lines.append(f"{heading} {board.puzzle_id}")
         place = 0
         previous_rank: float | None = None
         for index, entry in enumerate(board.entries, start=1):
@@ -284,5 +288,6 @@ def format_standings(standings: list[GameStandings], *, local_date: str) -> str:
             if entry.rank_key != previous_rank:
                 place = index
                 previous_rank = entry.rank_key
-            lines.append(f"{place}. {entry.display_name} - {entry.score}")
+            crown = " 👑" if place == 1 else ""
+            lines.append(f"{place}.{crown} {entry.display_name} - {entry.score}")
     return "\n".join(lines)

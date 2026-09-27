@@ -18,6 +18,7 @@ class TweetIdFromUrlTests(unittest.TestCase):
         self.assertIsNone(tweet_id_from_url("https://notx.com/alice/status/123"))
         self.assertIsNone(tweet_id_from_url("https://evil-twitter.com/alice/status/123"))
         self.assertIsNone(tweet_id_from_url("https://example.com/alice/status/123"))
+        self.assertIsNone(tweet_id_from_url("ftp://x.com/alice/status/123"))
 
     def test_extracts_visible_caption_and_hidden_links_once(self) -> None:
         message = {
@@ -30,7 +31,18 @@ class TweetIdFromUrlTests(unittest.TestCase):
         }
         self.assertEqual(extract_tweet_ids(message), ["11", "22", "33"])
 
+    def test_visible_lookalike_domains_and_embedded_urls_are_ignored(self) -> None:
+        message = {
+            "text": (
+                "https://notx.com/alice/status/11 "
+                "https://evil-twitter.com/bob/status/22 "
+                "https://example.com/x.com/cara/status/33 "
+                "https://example.com/?url=x.com/dan/status/44 "
+                "https://x.com/erin/status/55"
+            )
+        }
+        self.assertEqual(extract_tweet_ids(message), ["55"])
+
 
 if __name__ == "__main__":
     unittest.main()
-

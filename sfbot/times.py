@@ -17,7 +17,7 @@ def due_post_date(now: int, *, utc_offset_minutes: int, post_minute: int) -> str
     """Return the latest local date whose posting window has already opened.
 
     Before the daily time that is the previous local date, so a window missed
-    while the bot was down is still posted on the next poll instead of skipped.
+    overnight can still be posted on the next poll.
     """
 
     moment = _local_datetime(now, utc_offset_minutes)
