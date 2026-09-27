@@ -59,6 +59,7 @@ acceptable.
 - [x] Add a Fermi parser from real share text.
 - [x] Add a Connections parser from real share text.
 - [x] Restrict submissions to people the bot has seen in the group.
+- [x] DM each member their outstanding games an hour before the daily post.
 - [x] Decided: no retention window. Results are ~600 KB/year and are the
       durable artifact, unlike the five-day tweet cache.
 
@@ -81,3 +82,5 @@ acceptable.
 - [ ] Talking in the group is enough to become able to submit by DM.
 - [ ] `/leaderboard` lists each game's board, best result first.
 - [ ] The daily post arrives once at 21:00 SGT and not again after a restart.
+- [ ] Reminders arrive by DM at 20:00 SGT and name only outstanding games.
+- [ ] A repeated link's callout names the reposter when an action word is set.

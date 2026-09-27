@@ -141,6 +141,10 @@ GAMES: tuple[Callable[[str], ParsedResult | None], ...] = (
     _parse_connections,
 )
 
+# What the daily reminder checks each member against, in the order it lists
+# them. The names have to match what the parsers above put on a ParsedResult.
+GAME_NAMES: tuple[str, ...] = ("Wordle", "Krillion", "Fermi", "Connections")
+
 
 def parse_result(text: str) -> ParsedResult | None:
     """Return the first recognized daily-game result in a message body."""

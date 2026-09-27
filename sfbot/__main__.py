@@ -56,6 +56,13 @@ def _post_minute() -> int | None:
         raise SystemExit(f"SFBOT_LEADERBOARD_AT must be HH:MM ({error})") from error
 
 
+def _action_word() -> str | None:
+    """Return the callout verb for a repeated link, or None when unconfigured."""
+
+    raw = os.environ.get("SFBOT_ACTION_WORD", "").strip()
+    return raw or None
+
+
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -70,6 +77,7 @@ def main() -> None:
     utc_offset_minutes = _offset_minutes("SFBOT_UTC_OFFSET_MINUTES", 480)
     board_chat_id = _board_chat_id()
     post_minute = _post_minute()
+    action_word = _action_word()
     database_path = Path(os.environ.get("SFBOT_DB_PATH", "data/sfbot.db"))
 
     if board_chat_id is None:
@@ -92,6 +100,7 @@ def main() -> None:
             utc_offset_minutes=utc_offset_minutes,
             board_chat_id=board_chat_id,
             post_minute=post_minute,
+            action_word=action_word,
         )
 
 

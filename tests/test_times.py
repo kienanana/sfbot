@@ -1,6 +1,11 @@
 import unittest
 
-from sfbot.times import due_post_date, local_date, parse_daily_time
+from sfbot.times import (
+    due_post_date,
+    due_reminder_date,
+    local_date,
+    parse_daily_time,
+)
 
 SGT_OFFSET = 480
 
@@ -40,6 +45,39 @@ class DuePostDateTests(unittest.TestCase):
         self.assertEqual(
             due_post_date(
                 2_000_045_400, utc_offset_minutes=SGT_OFFSET, post_minute=21 * 60
+            ),
+            "2033-05-18",
+        )
+
+
+class DueReminderDateTests(unittest.TestCase):
+    def test_the_window_opens_an_hour_before_the_post(self) -> None:
+        # 20:00 and 19:59 SGT on 2033-05-18.
+        self.assertEqual(
+            due_reminder_date(
+                2_000_030_400, utc_offset_minutes=SGT_OFFSET, post_minute=21 * 60
+            ),
+            "2033-05-18",
+        )
+        self.assertEqual(
+            due_reminder_date(
+                2_000_030_340, utc_offset_minutes=SGT_OFFSET, post_minute=21 * 60
+            ),
+            "2033-05-17",
+        )
+
+    def test_a_post_just_after_midnight_is_warned_the_evening_before(self) -> None:
+        # 23:45 SGT on 2033-05-18 is the reminder for the 00:30 post on the 19th.
+        self.assertEqual(
+            due_reminder_date(
+                2_000_043_900, utc_offset_minutes=SGT_OFFSET, post_minute=30
+            ),
+            "2033-05-19",
+        )
+        # A minute before that window it is still the 18th's own reminder day.
+        self.assertEqual(
+            due_reminder_date(
+                2_000_042_940, utc_offset_minutes=SGT_OFFSET, post_minute=30
             ),
             "2033-05-18",
         )

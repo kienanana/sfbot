@@ -11,10 +11,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from .cache import DuplicateCache
-from .games import parse_result
+from .games import GAME_NAMES, parse_result
 from .leaderboard import LeaderboardStore, format_standings
 from .links import extract_tweet_ids
-from .times import due_post_date, local_date
+from .times import due_post_date, due_reminder_date, local_date
 
 LOG = logging.getLogger(__name__)
 
@@ -74,12 +74,12 @@ class TelegramClient:
         result = self._call("getUpdates", payload, timeout=poll_timeout + 10)
         return result if isinstance(result, list) else []
 
-    def send_sf_reply(self, *, chat_id: int, message_id: int) -> None:
+    def send_reply(self, *, chat_id: int, message_id: int, text: str) -> None:
         self._call(
             "sendMessage",
             {
                 "chat_id": chat_id,
-                "text": "sf",
+                "text": text,
                 "reply_parameters": {
                     "message_id": message_id,
                     "allow_sending_without_reply": False,
@@ -103,6 +103,20 @@ class TelegramClient:
             },
             timeout=20,
         )
+
+
+def _callout(action_word: str, display_name: str) -> list[str]:
+    """Return the lines that name the repeat poster after the `sf` reply.
+
+    Sent without a parse_mode like everything else the bot says, so the
+    asterisks show up literally and no display name needs escaping.
+    """
+
+    handle = "".join(display_name.split())
+    return [
+        f"Uh oh! Looks like {display_name}'s getting *{action_word}ed*",
+        f"Let's drop a /{action_word}{handle}",
+    ]
 
 
 def _message_body(message: Mapping[str, object]) -> str:
@@ -234,6 +248,7 @@ def handle_message(
     client: TelegramClient,
     utc_offset_minutes: int,
     board_chat_id: int | None,
+    action_word: str | None = None,
 ) -> None:
     chat = message.get("chat")
     if not isinstance(chat, Mapping) or not isinstance(chat.get("id"), int):
@@ -305,7 +320,9 @@ def handle_message(
             continue
 
         try:
-            client.send_sf_reply(chat_id=chat_id, message_id=original.message_id)
+            client.send_reply(
+                chat_id=chat_id, message_id=original.message_id, text="sf"
+            )
         except TelegramAPIError as error:
             description = error.description.lower()
             if (
@@ -325,6 +342,12 @@ def handle_message(
                 )
                 continue
             raise
+
+        # The callout names whoever reposted, so it goes to the chat rather than
+        # onto the original message it would otherwise seem to be about.
+        if action_word and sender is not None:
+            for line in _callout(action_word, sender[1]):
+                client.send_message(chat_id=chat_id, text=line)
 
 
 def post_due_leaderboard(
@@ -355,6 +378,56 @@ def post_due_leaderboard(
     LOG.info("Posted the %s leaderboard to chat %s", day, board_chat_id)
 
 
+def send_due_reminders(
+    client: TelegramClient,
+    store: LeaderboardStore,
+    *,
+    board_chat_id: int,
+    utc_offset_minutes: int,
+    post_minute: int,
+    now: int | None = None,
+) -> None:
+    """DM everyone the games they still owe, an hour before the day's post."""
+
+    moment = int(time.time()) if now is None else now
+    day = due_reminder_date(
+        moment, utc_offset_minutes=utc_offset_minutes, post_minute=post_minute
+    )
+    # Unlike a missed post, a missed reminder is worse than useless once the
+    # board it warns about has gone up. The two dates agree exactly outside the
+    # hour between a day's reminder and its post.
+    if day == due_post_date(
+        moment, utc_offset_minutes=utc_offset_minutes, post_minute=post_minute
+    ):
+        return
+    if not store.is_awaiting_reminder(chat_id=board_chat_id, local_date=day):
+        return
+
+    submitted = store.submitted_games(chat_id=board_chat_id, local_date=day)
+    for user_id in store.members(chat_id=board_chat_id):
+        played = submitted.get(user_id, frozenset())
+        missing = [game for game in GAME_NAMES if game not in played]
+        if not missing:
+            continue
+        try:
+            client.send_message(
+                chat_id=user_id,
+                text=(
+                    f"An hour until the {day} leaderboard. Still to play:"
+                    f" {', '.join(missing)}"
+                ),
+            )
+        except TelegramAPIError as error:
+            # Usually someone who never pressed Start, or who blocked the bot.
+            # Their reminder is not worth holding up everyone else's.
+            LOG.info("Could not remind user %s (%s)", user_id, error)
+
+    # Marked once the round is over, so a member added later today is not
+    # reminded twice.
+    store.mark_reminded(chat_id=board_chat_id, local_date=day)
+    LOG.info("Sent the %s reminders for chat %s", day, board_chat_id)
+
+
 def run_polling(
     client: TelegramClient,
     cache: DuplicateCache,
@@ -364,6 +437,7 @@ def run_polling(
     utc_offset_minutes: int = 0,
     board_chat_id: int | None = None,
     post_minute: int | None = None,
+    action_word: str | None = None,
 ) -> None:
     offset: int | None = None
     backoff = 1
@@ -384,6 +458,7 @@ def run_polling(
                         client=client,
                         utc_offset_minutes=utc_offset_minutes,
                         board_chat_id=board_chat_id,
+                        action_word=action_word,
                     )
                 # Only acknowledge an update after all of its side effects have
                 # succeeded. A transient sendMessage failure is then retried.
@@ -391,6 +466,13 @@ def run_polling(
                     offset = update_id + 1
 
             if board_chat_id is not None and post_minute is not None:
+                send_due_reminders(
+                    client,
+                    store,
+                    board_chat_id=board_chat_id,
+                    utc_offset_minutes=utc_offset_minutes,
+                    post_minute=post_minute,
+                )
                 post_due_leaderboard(
                     client,
                     store,
