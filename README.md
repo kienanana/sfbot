@@ -12,6 +12,19 @@ as a reply to the first message. The mention names the person who shared the
 duplicate; tapping the reply navigates to the original share. People without a
 username get a clickable name mention instead.
 
+Setting `SFBOT_ACTION_WORD` adds a callout naming whoever reposted. With
+`SFBOT_ACTION_WORD=Nuke`, Alice sharing a post and Bob resharing it gets:
+
+```
+sf @Bob                                     (a reply to Alice's message)
+Uh oh! Looks like Bob's getting *Nuked*
+Let's drop a /NukeBob
+```
+
+The past tense is the word plus `d`, so the word is expected to end in `e`. The
+asterisks are literal: the bot sends no `parse_mode`, so nothing in a display
+name ever needs escaping.
+
 The canonical key is Twitter's numeric status ID. As a result, `twitter.com`
 and `x.com` links, different usernames, mobile subdomains, tracking parameters,
 and `/photo/1` suffixes all resolve to the same post. Origins are stored in an
@@ -57,13 +70,14 @@ flowchart TD
     O -->|yes| P["DM: 'Recorded Wordle 1412 - 3/6'<br/>group: react 👍"]
     O -->|no| Q["DM: 'You already submitted'<br/>group: silence"]
 
-    A --> R["after each batch:<br/>post_due_leaderboard"]
+    A --> R["after each batch:<br/>send_due_reminders,<br/>post_due_leaderboard"]
     R --> S{"past 21:00 SGT<br/>and not posted yet?"}
     S -->|yes| T["post the day's boards<br/>to the group"]
+    R --> U{"in the hour before,<br/>and not reminded yet?"}
+    U -->|yes| V["DM each member<br/>the games they still owe"]
 ```
 
-Results reach the board from members' DMs, so the group itself stays quiet
-until the daily post.
+Members can submit results by DM without posting their share text to the group.
 
 ## Prerequisites
 
@@ -74,11 +88,16 @@ it in an uncommitted `.env` file:
 ```dotenv
 TELEGRAM_BOT_TOKEN=replace-with-the-real-token
 SFBOT_LEADERBOARD_CHAT_ID=-1001234567890
+SFBOT_ACTION_WORD=Nuke
 ```
 
 `SFBOT_LEADERBOARD_CHAT_ID` is the group the daily leaderboard posts to; see
 [Finding the group's chat ID](#finding-the-groups-chat-id). Leave it out to run
-link deduplication and `/games` without the leaderboard.
+link deduplication and `/games` without the leaderboard. `SFBOT_ACTION_WORD` is
+the repeat-poster callout verb; leave it out to send only the `sf` mention.
+
+`compose.yaml` passes each of these into the container by name, so a new
+variable has to be added there as well as to `.env`.
 
 Never commit or post the token. Only one instance may use it at a time because
 Telegram permits only one active `getUpdates` poller per bot.
@@ -184,6 +203,13 @@ you:  Wordle 1,412 3/6
 bot:  Recorded Wordle 1412 - 3/6
 ```
 
+An hour before the post, the bot DMs each member of the roster the games they
+have not submitted yet, skipping anyone who has played all of them. A member who
+never pressed Start cannot be DM'd; that failure is logged and the rest still go
+out. Unlike the post itself, a reminder missed while the bot was down is dropped
+rather than sent late, since a warning about a board that has already gone up is
+worse than none.
+
 At or after 21:00 SGT, the bot posts the day's boards to the group once results
 exist. Each game and puzzle number gets its own board, ordered best result first;
 there is no combined points table. Results submitted after the post still appear
@@ -265,6 +291,7 @@ not match, and add cases to `tests/test_games.py` from real share text.
 | `SFBOT_LEADERBOARD_CHAT_ID` | Unset | Group the leaderboard posts to; unset disables the feature |
 | `SFBOT_UTC_OFFSET_MINUTES` | `480` | Local day boundary for the leaderboard (480 = SGT) |
 | `SFBOT_LEADERBOARD_AT` | `21:00` | Local time of the daily post; `off` for `/leaderboard` only |
+| `SFBOT_ACTION_WORD` | Unset | Verb for the repeat-poster callout; unset sends only the `sf` mention |
 
 ## Behavior details
 

@@ -62,6 +62,7 @@ acceptable.
 - [x] Add `/games` with links to the supported games.
 - [x] Show game emojis and crown the first-place player or tied players.
 - [x] Restrict submissions to people the bot has seen in the group.
+- [x] DM each member their outstanding games an hour before the daily post.
 - [x] Decided: no retention window. Results are ~600 KB/year and are the
       durable artifact, unlike the five-day tweet cache.
 
@@ -86,3 +87,5 @@ acceptable.
 - [ ] `/games` links to all four supported games.
 - [ ] Each game heading shows its emoji and first place shows a crown.
 - [ ] The daily post arrives once at 21:00 SGT and not again after a restart.
+- [ ] Reminders arrive by DM at 20:00 SGT and name only outstanding games.
+- [ ] A repeated link's callout names the reposter when an action word is set.

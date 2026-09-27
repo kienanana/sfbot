@@ -65,6 +65,15 @@ class LeaderboardStore:
         )
         self._connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS reminded_days (
+                chat_id INTEGER NOT NULL,
+                local_date TEXT NOT NULL,
+                PRIMARY KEY (chat_id, local_date)
+            ) WITHOUT ROWID
+            """
+        )
+        self._connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS group_members (
                 chat_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
@@ -97,6 +106,31 @@ class LeaderboardStore:
                 (chat_id, user_id),
             ).fetchone()
         return row is not None
+
+    def members(self, *, chat_id: int) -> list[int]:
+        """Return every user the bot has seen in the group."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT user_id FROM group_members WHERE chat_id = ? ORDER BY user_id",
+                (chat_id,),
+            ).fetchall()
+        return [int(row[0]) for row in rows]
+
+    def submitted_games(self, *, chat_id: int, local_date: str) -> dict[int, set[str]]:
+        """Return the games each person has already submitted on a day."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT user_id, game FROM game_results"
+                " WHERE chat_id = ? AND local_date = ?",
+                (chat_id, local_date),
+            ).fetchall()
+
+        submitted: dict[int, set[str]] = {}
+        for user_id, game in rows:
+            submitted.setdefault(int(user_id), set()).add(str(game))
+        return submitted
 
     def record(
         self,
@@ -196,6 +230,26 @@ class LeaderboardStore:
         with self._lock, self._connection:
             cursor = self._connection.execute(
                 "INSERT OR IGNORE INTO posted_days (chat_id, local_date) VALUES (?, ?)",
+                (chat_id, local_date),
+            )
+        return cursor.rowcount == 1
+
+    def is_awaiting_reminder(self, *, chat_id: int, local_date: str) -> bool:
+        """Return whether a day's reminder round has not been sent yet."""
+
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT 1 FROM reminded_days WHERE chat_id = ? AND local_date = ?",
+                (chat_id, local_date),
+            ).fetchone()
+        return row is None
+
+    def mark_reminded(self, *, chat_id: int, local_date: str) -> bool:
+        """Record that a day's reminders are done, returning False if they already were."""
+
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                "INSERT OR IGNORE INTO reminded_days (chat_id, local_date) VALUES (?, ?)",
                 (chat_id, local_date),
             )
         return cursor.rowcount == 1
