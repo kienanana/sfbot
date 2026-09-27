@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sfbot"
 version = "0.1.0"
-description = "A Telegram bot that calls out repeated Twitter/X posts"
+description = "A Telegram bot for duplicate links and daily game leaderboards"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
@@ -15,7 +15,4 @@ sfbot = "sfbot.__main__:main"
 
 [tool.setuptools.packages.find]
 include = ["sfbot*"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
 

@@ -17,6 +17,7 @@ acceptable.
 
 - [ ] Persist the last successfully processed Telegram update ID in SQLite.
 - [ ] Prevent a replayed duplicate update from sending a second `sf` response.
+- [ ] Catch up daily posts missed during outages longer than one day.
 - [ ] Isolate failures per update so one malformed message cannot stop polling.
 - [ ] Handle `SIGINT` and `SIGTERM` cleanly and close SQLite before exiting.
 - [ ] Verify transient Telegram and network failures retry the pending update.
@@ -58,6 +59,8 @@ acceptable.
 - [x] Add a Krillion parser from real share text.
 - [x] Add a Fermi parser from real share text.
 - [x] Add a Connections parser from real share text.
+- [x] Add `/games` with links to the supported games.
+- [x] Show game emojis and crown the first-place player or tied players.
 - [x] Restrict submissions to people the bot has seen in the group.
 - [x] Decided: no retention window. Results are ~600 KB/year and are the
       durable artifact, unlike the five-day tweet cache.
@@ -65,7 +68,7 @@ acceptable.
 ## Release acceptance test
 
 - [ ] A first Twitter/X link is stored without a response.
-- [ ] Sharing the same link again replies `sf` to the original message.
+- [ ] Sharing the same link again replies `sf @sharer` to the original message.
 - [ ] Equivalent `twitter.com` and `x.com` URL variants match.
 - [ ] Tracking parameters and `/photo/1` suffixes do not affect matching.
 - [ ] Different Telegram chats have independent caches.
@@ -80,4 +83,6 @@ acceptable.
 - [ ] A DM from a non-member is refused and nothing is recorded.
 - [ ] Talking in the group is enough to become able to submit by DM.
 - [ ] `/leaderboard` lists each game's board, best result first.
+- [ ] `/games` links to all four supported games.
+- [ ] Each game heading shows its emoji and first place shows a crown.
 - [ ] The daily post arrives once at 21:00 SGT and not again after a restart.

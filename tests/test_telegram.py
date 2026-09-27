@@ -1,28 +1,45 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from sfbot.cache import DuplicateCache
 from sfbot.games import parse_result
 from sfbot.leaderboard import LeaderboardStore
-from sfbot.telegram import TelegramAPIError, handle_message, post_due_leaderboard
+from sfbot.telegram import (
+    TelegramAPIError,
+    TelegramClient,
+    handle_message,
+    post_due_leaderboard,
+)
 
 SGT_OFFSET = 480
 GROUP = -100
+OTHER_GROUP = -200
 DM = 555
 
 
 class FakeTelegramClient:
     def __init__(self) -> None:
-        self.replies: list[tuple[int, int]] = []
+        self.replies: list[tuple[int, int, object]] = []
         self.sent: list[tuple[int, str]] = []
+        self.sent_entities: list[list[dict[str, object]] | None] = []
         self.reactions: list[tuple[int, int, str]] = []
 
-    def send_sf_reply(self, *, chat_id: int, message_id: int) -> None:
-        self.replies.append((chat_id, message_id))
+    def send_sf_reply(
+        self, *, chat_id: int, message_id: int, sender: object
+    ) -> None:
+        self.replies.append((chat_id, message_id, sender))
 
-    def send_message(self, *, chat_id: int, text: str) -> None:
+    def send_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        entities: list[dict[str, object]] | None = None,
+    ) -> None:
         self.sent.append((chat_id, text))
+        self.sent_entities.append(entities)
 
     def set_message_reaction(
         self, *, chat_id: int, message_id: int, emoji: str
@@ -31,7 +48,9 @@ class FakeTelegramClient:
 
 
 class MissingReplyClient(FakeTelegramClient):
-    def send_sf_reply(self, *, chat_id: int, message_id: int) -> None:
+    def send_sf_reply(
+        self, *, chat_id: int, message_id: int, sender: object
+    ) -> None:
         raise TelegramAPIError(400, "Bad Request: message to be replied not found")
 
 
@@ -101,7 +120,7 @@ class HandleMessageTests(unittest.TestCase):
         }
         self.handle(first)
         self.handle(second)
-        self.assertEqual(self.client.replies, [(-100, 41)])
+        self.assertEqual(self.client.replies, [(-100, 41, None)])
 
     def test_deleted_origin_promotes_current_message(self) -> None:
         first = {
@@ -118,7 +137,29 @@ class HandleMessageTests(unittest.TestCase):
         working_client = FakeTelegramClient()
         self.handle(third, client=working_client)
 
-        self.assertEqual(working_client.replies, [(-100, 42)])
+        self.assertEqual(working_client.replies, [(-100, 42, None)])
+
+    def test_duplicate_reply_mentions_the_person_who_shared_it_again(self) -> None:
+        self.handle(
+            {
+                "chat": {"id": GROUP, "type": "supergroup"},
+                "message_id": 41,
+                "date": 2_000_000_000,
+                "from": {"id": 5, "first_name": "Alice"},
+                "text": "https://x.com/alice/status/123",
+            }
+        )
+        bob = {"id": 6, "first_name": "Bob", "username": "bob"}
+        self.handle(
+            {
+                "chat": {"id": GROUP, "type": "supergroup"},
+                "message_id": 42,
+                "date": 2_000_000_010,
+                "from": bob,
+                "text": "https://x.com/bob/status/123",
+            }
+        )
+        self.assertEqual(self.client.replies, [(GROUP, 41, bob)])
 
     def test_a_direct_message_scores_against_the_group_board(self) -> None:
         self.dm(
@@ -173,7 +214,7 @@ class HandleMessageTests(unittest.TestCase):
         self.dm("Wordle 1,234 3/6")
         self.client.sent.clear()
 
-        board = "Daily games - 2033-05-18\n\nWordle 1234\n1. Alice - 3/6"
+        board = "Daily games - 2033-05-18\n\n🆆 Wordle 1234\n1. 👑 Alice - 3/6"
         for chat_id, chat_type, text in (
             (DM, "private", "/leaderboard"),
             (GROUP, "supergroup", "/leaderboard@sfbot"),
@@ -191,6 +232,90 @@ class HandleMessageTests(unittest.TestCase):
 
         # Same standings both times, delivered back to whoever asked.
         self.assertEqual(self.client.sent, [(DM, board), (GROUP, board)])
+
+    def test_games_command_links_every_supported_game(self) -> None:
+        for chat_id, chat_type, command in (
+            (DM, "private", "/games"),
+            (GROUP, "supergroup", "/games@sfbot"),
+        ):
+            self.handle(
+                {
+                    "chat": {"id": chat_id, "type": chat_type},
+                    "message_id": 8,
+                    "date": 2_000_000_100,
+                    "from": {"id": 6, "first_name": "Bob"},
+                    "text": command,
+                    "entities": command_entity(command),
+                },
+                board_chat_id=None,
+            )
+
+        expected = "Games:\n🆆 Wordle\n🦐 Krillion\n🧮 Fermi\n🧩 Connections"
+        self.assertEqual(self.client.sent, [(DM, expected), (GROUP, expected)])
+        for entities in self.client.sent_entities:
+            assert entities is not None
+            encoded = expected.encode("utf-16-le")
+            self.assertEqual(
+                [
+                    (
+                        entity["url"],
+                        encoded[
+                            2 * int(entity["offset"]):
+                            2 * (int(entity["offset"]) + int(entity["length"]))
+                        ].decode("utf-16-le"),
+                    )
+                    for entity in entities
+                ],
+                [
+                    ("https://www.nytimes.com/games/wordle/index.html", "Wordle"),
+                    ("https://krillion.io/", "Krillion"),
+                    ("https://fermi.gg/", "Fermi"),
+                    ("https://www.nytimes.com/games/connections", "Connections"),
+                ],
+            )
+
+    def test_another_group_cannot_submit_or_read_the_board(self) -> None:
+        self.handle(
+            {
+                "chat": {"id": OTHER_GROUP, "type": "supergroup"},
+                "message_id": 9,
+                "date": 2_000_000_000,
+                "from": {"id": 99, "first_name": "Mallory"},
+                "text": "Wordle 1,234 1/6",
+            }
+        )
+        command = "/leaderboard"
+        self.handle(
+            {
+                "chat": {"id": OTHER_GROUP, "type": "supergroup"},
+                "message_id": 10,
+                "date": 2_000_000_010,
+                "from": {"id": 99, "first_name": "Mallory"},
+                "text": command,
+                "entities": command_entity(command),
+            }
+        )
+
+        self.assertEqual(self.client.sent, [])
+        self.assertEqual(
+            self.store.standings(chat_id=GROUP, local_date="2033-05-18"), []
+        )
+        self.assertFalse(self.store.is_member(chat_id=GROUP, user_id=99))
+
+        for message_id in (11, 12):
+            self.handle(
+                {
+                    "chat": {"id": OTHER_GROUP, "type": "supergroup"},
+                    "message_id": message_id,
+                    "date": 2_000_000_020 + message_id,
+                    "from": {"id": 99, "first_name": "Mallory"},
+                    "text": "https://x.com/alice/status/123",
+                }
+            )
+        self.assertEqual(
+            self.client.replies,
+            [(OTHER_GROUP, 11, {"id": 99, "first_name": "Mallory"})],
+        )
 
     def test_a_stranger_cannot_submit_by_direct_message(self) -> None:
         self.dm("Wordle 1,234 1/6", user_id=99, name="Mallory")
@@ -272,6 +397,45 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(self.client.reactions, [])
         self.assertEqual(
             self.store.standings(chat_id=GROUP, local_date="2033-05-18"), []
+        )
+
+
+class TelegramClientTests(unittest.TestCase):
+    def test_sf_reply_mentions_a_username(self) -> None:
+        client = TelegramClient("test")
+        with patch.object(client, "_call") as call:
+            client.send_sf_reply(
+                chat_id=GROUP,
+                message_id=41,
+                sender={"id": 6, "first_name": "Bob", "username": "bob"},
+            )
+
+        payload = call.call_args.args[1]
+        self.assertEqual(payload["text"], "sf @bob")
+        self.assertEqual(payload["reply_parameters"]["message_id"], 41)
+        self.assertNotIn("entities", payload)
+
+    def test_sf_reply_mentions_a_user_without_a_username(self) -> None:
+        client = TelegramClient("test")
+        with patch.object(client, "_call") as call:
+            client.send_sf_reply(
+                chat_id=GROUP,
+                message_id=41,
+                sender={"id": 6, "first_name": "B🦐b"},
+            )
+
+        payload = call.call_args.args[1]
+        self.assertEqual(payload["text"], "sf @B🦐b")
+        self.assertEqual(
+            payload["entities"],
+            [
+                {
+                    "type": "text_mention",
+                    "offset": 3,
+                    "length": 5,
+                    "user": {"id": 6, "is_bot": False, "first_name": "B🦐b"},
+                }
+            ],
         )
 
 

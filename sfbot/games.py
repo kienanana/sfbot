@@ -1,8 +1,8 @@
 """Recognition of daily puzzle-game share text.
 
-Each game contributes one parser to `GAMES`. A parser reads a message body and
-returns a `ParsedResult`, or `None` when the body is not that game's share text.
-Adding a game is a function plus an entry in the registry.
+Each `GAMES` entry pairs a parser with its name, emoji, and URL. A parser reads
+a message body and returns a `ParsedResult`, or `None` when the body is not that
+game's share text. Adding a game is a function plus an entry in the registry.
 """
 
 from __future__ import annotations
@@ -134,19 +134,39 @@ def _parse_connections(text: str) -> ParsedResult | None:
     )
 
 
-GAMES: tuple[Callable[[str], ParsedResult | None], ...] = (
-    _parse_wordle,
-    _parse_krillion,
-    _parse_fermi,
-    _parse_connections,
+@dataclass(frozen=True, slots=True)
+class Game:
+    name: str
+    emoji: str
+    url: str
+    parse: Callable[[str], ParsedResult | None]
+
+
+GAMES: tuple[Game, ...] = (
+    Game(
+        "Wordle",
+        "🆆",
+        "https://www.nytimes.com/games/wordle/index.html",
+        _parse_wordle,
+    ),
+    Game("Krillion", "🦐", "https://krillion.io/", _parse_krillion),
+    Game("Fermi", "🧮", "https://fermi.gg/", _parse_fermi),
+    Game(
+        "Connections",
+        "🧩",
+        "https://www.nytimes.com/games/connections",
+        _parse_connections,
+    ),
 )
+
+GAME_BY_NAME = {game.name: game for game in GAMES}
 
 
 def parse_result(text: str) -> ParsedResult | None:
     """Return the first recognized daily-game result in a message body."""
 
-    for parse in GAMES:
-        result = parse(text)
+    for game in GAMES:
+        result = game.parse(text)
         if result is not None:
             return result
     return None

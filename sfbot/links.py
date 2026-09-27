@@ -8,7 +8,9 @@ from urllib.parse import urlsplit
 
 
 _VISIBLE_URL = re.compile(
-    r"(?i)(?:https?://)?(?:[a-z0-9-]+\.)?(?:twitter\.com|x\.com)/[^\s<>]+"
+    r"(?i)(?:https?://[^\s<>]+|"
+    r"(?<![a-z0-9_.:/?=&@-])(?:[a-z0-9-]+\.)*"
+    r"(?:twitter\.com|x\.com)/[^\s<>]+)"
 )
 _TRAILING_PUNCTUATION = ".,;:!?)]}'\""
 
@@ -29,6 +31,8 @@ def tweet_id_from_url(value: str) -> str | None:
     except ValueError:
         return None
 
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return None
     host = (parsed.hostname or "").lower().rstrip(".")
     if not (
         host in {"twitter.com", "x.com"}
@@ -75,4 +79,3 @@ def extract_tweet_ids(message: Mapping[str, object]) -> list[str]:
             seen.add(tweet_id)
             result.append(tweet_id)
     return result
-
