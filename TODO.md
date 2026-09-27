@@ -49,6 +49,19 @@ acceptable.
 - [ ] Document how to inspect status, logs, and container restart count.
 - [ ] Confirm container rebuilds preserve the `sfbot-data` volume.
 
+## P1 — Daily games leaderboard
+
+- [x] Collect results by direct message so the group sees no share text.
+- [x] Confirm a DM'd result in the DM, and a group paste with a 👍.
+- [x] Serve `/leaderboard` on demand and post automatically at 21:00 SGT.
+- [x] Make the first result of a game on a day final.
+- [x] Add a Krillion parser from real share text.
+- [x] Add a Fermi parser from real share text.
+- [x] Add a Connections parser from real share text.
+- [x] Restrict submissions to people the bot has seen in the group.
+- [x] Decided: no retention window. Results are ~600 KB/year and are the
+      durable artifact, unlike the five-day tweet cache.
+
 ## Release acceptance test
 
 - [ ] A first Twitter/X link is stored without a response.
@@ -61,3 +74,10 @@ acceptable.
 - [ ] A deleted original message promotes the current share safely.
 - [ ] The bot recovers after a temporary network failure.
 - [ ] The bot starts automatically after the homelab reboots.
+- [ ] A Wordle result DM'd to the bot is confirmed and never reaches the group.
+- [ ] A second Wordle DM from the same person is refused.
+- [ ] Each member can DM the bot after pressing Start.
+- [ ] A DM from a non-member is refused and nothing is recorded.
+- [ ] Talking in the group is enough to become able to submit by DM.
+- [ ] `/leaderboard` lists each game's board, best result first.
+- [ ] The daily post arrives once at 21:00 SGT and not again after a restart.
