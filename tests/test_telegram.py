@@ -134,16 +134,16 @@ class HandleMessageTests(unittest.TestCase):
             "date": 2_000_000_010,
             "from": {"id": 6, "first_name": "Bob"},
         }
-        self.handle(first, action_word="Kick")
-        self.handle(second, action_word="Kick")
+        self.handle(first, action_word="Nuke")
+        self.handle(second, action_word="Nuke")
 
         self.assertEqual(self.client.replies, [(GROUP, 41)])
         self.assertEqual(
             self.client.sent,
             [
                 (GROUP, "sf"),
-                (GROUP, "Uh oh! Looks like Bob's getting *Kicked*"),
-                (GROUP, "Let's drop a /KickBob"),
+                (GROUP, "Uh oh! Looks like Bob's getting *Nuked*"),
+                (GROUP, "Let's drop a /NukeBob"),
             ],
         )
 

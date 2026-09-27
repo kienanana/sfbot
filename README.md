@@ -11,16 +11,17 @@ was shared in that chat during the previous five days, it sends `sf` as a reply
 to the first message so tapping the reply navigates to the original share.
 
 Setting `SFBOT_ACTION_WORD` adds a callout naming whoever reposted. With
-`SFBOT_ACTION_WORD=Kick`, Alice sharing a post and Bob resharing it gets:
+`SFBOT_ACTION_WORD=Nuke`, Alice sharing a post and Bob resharing it gets:
 
 ```
 sf                                          (a reply to Alice's message)
-Uh oh! Looks like Bob's getting *Kicked*
-Let's drop a /KickBob
+Uh oh! Looks like Bob's getting *Nuked*
+Let's drop a /NukeBob
 ```
 
-The past tense is the word plus `ed`, and the asterisks are literal: the bot
-sends no `parse_mode`, so nothing in a display name ever needs escaping.
+The past tense is the word plus `d`, so the word is expected to end in `e`. The
+asterisks are literal: the bot sends no `parse_mode`, so nothing in a display
+name ever needs escaping.
 
 The canonical key is Twitter's numeric status ID. As a result, `twitter.com`
 and `x.com` links, different usernames, mobile subdomains, tracking parameters,
@@ -82,7 +83,7 @@ it in an uncommitted `.env` file:
 ```dotenv
 TELEGRAM_BOT_TOKEN=replace-with-the-real-token
 SFBOT_LEADERBOARD_CHAT_ID=-1001234567890
-SFBOT_ACTION_WORD=Kick
+SFBOT_ACTION_WORD=Nuke
 ```
 
 `SFBOT_LEADERBOARD_CHAT_ID` is the group the daily leaderboard posts to; see
