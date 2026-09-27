@@ -82,11 +82,16 @@ it in an uncommitted `.env` file:
 ```dotenv
 TELEGRAM_BOT_TOKEN=replace-with-the-real-token
 SFBOT_LEADERBOARD_CHAT_ID=-1001234567890
+SFBOT_ACTION_WORD=Kick
 ```
 
 `SFBOT_LEADERBOARD_CHAT_ID` is the group the daily leaderboard posts to; see
 [Finding the group's chat ID](#finding-the-groups-chat-id). Leave it out to run
-link deduplication alone.
+link deduplication alone. `SFBOT_ACTION_WORD` is the repeat-poster callout verb;
+leave it out to reply with `sf` alone.
+
+`compose.yaml` passes each of these into the container by name, so a new
+variable has to be added there as well as to `.env`.
 
 Never commit or post the token. Only one instance may use it at a time because
 Telegram permits only one active `getUpdates` poller per bot.
