@@ -5,7 +5,12 @@ from pathlib import Path
 from sfbot.cache import DuplicateCache
 from sfbot.games import parse_result
 from sfbot.leaderboard import LeaderboardStore
-from sfbot.telegram import TelegramAPIError, handle_message, post_due_leaderboard
+from sfbot.telegram import (
+    TelegramAPIError,
+    handle_message,
+    post_due_leaderboard,
+    send_due_reminders,
+)
 
 SGT_OFFSET = 480
 GROUP = -100
@@ -18,8 +23,9 @@ class FakeTelegramClient:
         self.sent: list[tuple[int, str]] = []
         self.reactions: list[tuple[int, int, str]] = []
 
-    def send_sf_reply(self, *, chat_id: int, message_id: int) -> None:
+    def send_reply(self, *, chat_id: int, message_id: int, text: str) -> None:
         self.replies.append((chat_id, message_id))
+        self.sent.append((chat_id, text))
 
     def send_message(self, *, chat_id: int, text: str) -> None:
         self.sent.append((chat_id, text))
@@ -31,8 +37,17 @@ class FakeTelegramClient:
 
 
 class MissingReplyClient(FakeTelegramClient):
-    def send_sf_reply(self, *, chat_id: int, message_id: int) -> None:
+    def send_reply(self, *, chat_id: int, message_id: int, text: str) -> None:
         raise TelegramAPIError(400, "Bad Request: message to be replied not found")
+
+
+class BlockedDirectMessageClient(FakeTelegramClient):
+    """Refuses DMs to user 6, the way Telegram refuses someone who never started."""
+
+    def send_message(self, *, chat_id: int, text: str) -> None:
+        if chat_id == 6:
+            raise TelegramAPIError(403, "Forbidden: bot can't initiate conversation")
+        super().send_message(chat_id=chat_id, text=text)
 
 
 def command_entity(text: str) -> list[dict[str, object]]:
@@ -63,6 +78,7 @@ class HandleMessageTests(unittest.TestCase):
         *,
         client: FakeTelegramClient | None = None,
         board_chat_id: int | None = GROUP,
+        action_word: str | None = None,
     ) -> None:
         handle_message(
             message,  # type: ignore[arg-type]
@@ -71,6 +87,7 @@ class HandleMessageTests(unittest.TestCase):
             client=self.client if client is None else client,
             utc_offset_minutes=SGT_OFFSET,
             board_chat_id=board_chat_id,
+            action_word=action_word,
         )
 
     def dm(
@@ -102,6 +119,46 @@ class HandleMessageTests(unittest.TestCase):
         self.handle(first)
         self.handle(second)
         self.assertEqual(self.client.replies, [(-100, 41)])
+
+    def test_an_action_word_calls_out_the_repeat_poster(self) -> None:
+        first = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": "https://x.com/someone/status/123",
+        }
+        second = {
+            **first,
+            "message_id": 99,
+            "date": 2_000_000_010,
+            "from": {"id": 6, "first_name": "Bob"},
+        }
+        self.handle(first, action_word="Kick")
+        self.handle(second, action_word="Kick")
+
+        self.assertEqual(self.client.replies, [(GROUP, 41)])
+        self.assertEqual(
+            self.client.sent,
+            [
+                (GROUP, "sf"),
+                (GROUP, "Uh oh! Looks like Bob's getting *Kicked*"),
+                (GROUP, "Let's drop a /KickBob"),
+            ],
+        )
+
+    def test_without_an_action_word_only_sf_is_sent(self) -> None:
+        first = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": "https://x.com/someone/status/123",
+        }
+        self.handle(first)
+        self.handle({**first, "message_id": 99, "from": {"id": 6, "first_name": "Bob"}})
+
+        self.assertEqual(self.client.sent, [(GROUP, "sf")])
 
     def test_deleted_origin_promotes_current_message(self) -> None:
         first = {
@@ -272,6 +329,104 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(self.client.reactions, [])
         self.assertEqual(
             self.store.standings(chat_id=GROUP, local_date="2033-05-18"), []
+        )
+
+
+class SendDueRemindersTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.store = LeaderboardStore(Path(self.temp_dir.name) / "sfbot.db")
+        self.client = FakeTelegramClient()
+        for user_id in (5, 6):
+            self.store.remember_member(
+                chat_id=GROUP, user_id=user_id, seen_at=1_999_000_000
+            )
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.temp_dir.cleanup()
+
+    def remind(self, now: int, *, client: FakeTelegramClient | None = None) -> None:
+        send_due_reminders(
+            self.client if client is None else client,  # type: ignore[arg-type]
+            self.store,
+            board_chat_id=GROUP,
+            utc_offset_minutes=SGT_OFFSET,
+            post_minute=21 * 60,
+            now=now,
+        )
+
+    def record(self, text: str, *, user_id: int, name: str) -> None:
+        result = parse_result(text)
+        assert result is not None
+        self.store.record(
+            chat_id=GROUP,
+            local_date="2033-05-18",
+            user_id=user_id,
+            display_name=name,
+            result=result,
+            submitted_at=2_000_000_000,
+        )
+
+    def test_each_member_is_dmd_only_the_games_they_still_owe(self) -> None:
+        self.record("Wordle 1,234 3/6", user_id=5, name="Alice")
+
+        # 2033-05-18 20:00 SGT, an hour before the 21:00 post.
+        self.remind(2_000_030_400)
+
+        self.assertEqual(
+            self.client.sent,
+            [
+                (
+                    5,
+                    "An hour until the 2033-05-18 leaderboard. Still to play:"
+                    " Krillion, Fermi, Connections",
+                ),
+                (
+                    6,
+                    "An hour until the 2033-05-18 leaderboard. Still to play:"
+                    " Wordle, Krillion, Fermi, Connections",
+                ),
+            ],
+        )
+
+    def test_nothing_is_sent_before_the_window_opens(self) -> None:
+        # 2033-05-18 19:30 SGT.
+        self.remind(2_000_028_600)
+        self.assertEqual(self.client.sent, [])
+
+    def test_nothing_is_sent_once_the_board_has_gone_up(self) -> None:
+        # 2033-05-18 21:30 SGT: too late to warn about a board already posted.
+        self.remind(2_000_035_800)
+        self.assertEqual(self.client.sent, [])
+
+    def test_reminders_are_sent_once_a_day(self) -> None:
+        self.remind(2_000_030_400)
+        self.client.sent.clear()
+        self.remind(2_000_031_000)
+
+        self.assertEqual(self.client.sent, [])
+
+    def test_someone_with_nothing_left_is_not_reminded(self) -> None:
+        for text, name in (
+            ("Wordle 1,234 3/6", "Alice"),
+            ("Krillion #7\n1,200", "Alice"),
+            ("Fermi 42\n1.0\u00d7 score", "Alice"),
+            ("Connections\nPuzzle #99\n\U0001f7e8\U0001f7e8\U0001f7e8\U0001f7e8", "Alice"),
+        ):
+            self.record(text, user_id=5, name=name)
+
+        self.remind(2_000_030_400)
+
+        self.assertEqual([chat_id for chat_id, _ in self.client.sent], [6])
+
+    def test_one_unreachable_member_does_not_stop_the_rest(self) -> None:
+        client = BlockedDirectMessageClient()
+        self.remind(2_000_030_400, client=client)
+
+        self.assertEqual([chat_id for chat_id, _ in client.sent], [5])
+        self.assertFalse(
+            self.store.is_awaiting_reminder(chat_id=GROUP, local_date="2033-05-18")
         )
 
 

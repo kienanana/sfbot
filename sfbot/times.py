@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+REMINDER_LEAD_MINUTES = 60
+
 
 def local_date(epoch_seconds: int, *, utc_offset_minutes: int) -> str:
     """Return the ISO calendar date an epoch timestamp falls on locally."""
@@ -22,6 +24,19 @@ def due_post_date(now: int, *, utc_offset_minutes: int, post_minute: int) -> str
     if moment.hour * 60 + moment.minute < post_minute:
         moment -= timedelta(days=1)
     return moment.strftime("%Y-%m-%d")
+
+
+def due_reminder_date(now: int, *, utc_offset_minutes: int, post_minute: int) -> str:
+    """Return the local date whose reminder window has already opened.
+
+    The reminder runs an hour before that day's post, which for a post shortly
+    after local midnight falls on the previous calendar day.
+    """
+
+    moment = _local_datetime(now, utc_offset_minutes)
+    minutes = moment.hour * 60 + moment.minute
+    days = (minutes - (post_minute - REMINDER_LEAD_MINUTES)) // (24 * 60)
+    return (moment + timedelta(days=days)).strftime("%Y-%m-%d")
 
 
 def parse_daily_time(value: str) -> int:
