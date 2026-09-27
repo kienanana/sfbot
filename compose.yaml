@@ -6,6 +6,9 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       SFBOT_DB_PATH: /data/sfbot.db
       SFBOT_RETENTION_DAYS: 5
+      SFBOT_LEADERBOARD_CHAT_ID: ${SFBOT_LEADERBOARD_CHAT_ID}
+      SFBOT_UTC_OFFSET_MINUTES: 480
+      SFBOT_LEADERBOARD_AT: "21:00"
     volumes:
       - sfbot-data:/data
 

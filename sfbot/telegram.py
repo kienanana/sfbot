@@ -11,10 +11,19 @@ from collections.abc import Mapping
 from typing import Any
 
 from .cache import DuplicateCache
+from .games import parse_result
+from .leaderboard import LeaderboardStore, format_standings
 from .links import extract_tweet_ids
-
+from .times import due_post_date, local_date
 
 LOG = logging.getLogger(__name__)
+
+_LEADERBOARD_COMMAND = "/leaderboard"
+_ACKNOWLEDGEMENT = "\N{THUMBS UP SIGN}"
+_UNKNOWN_SENDER = (
+    "I don't have you on the group roster yet. Say anything in the group chat,"
+    " then send this again."
+)
 
 
 class TelegramAPIError(RuntimeError):
@@ -48,11 +57,14 @@ class TelegramClient:
 
         if not result.get("ok"):
             raise TelegramAPIError(
-                int(result.get("error_code", 500)), str(result.get("description", "unknown error"))
+                int(result.get("error_code", 500)),
+                str(result.get("description", "unknown error")),
             )
         return result.get("result")
 
-    def get_updates(self, *, offset: int | None, poll_timeout: int) -> list[dict[str, object]]:
+    def get_updates(
+        self, *, offset: int | None, poll_timeout: int
+    ) -> list[dict[str, object]]:
         payload: dict[str, object] = {
             "timeout": poll_timeout,
             "allowed_updates": ["message"],
@@ -76,9 +88,152 @@ class TelegramClient:
             timeout=20,
         )
 
+    def send_message(self, *, chat_id: int, text: str) -> None:
+        self._call("sendMessage", {"chat_id": chat_id, "text": text}, timeout=20)
+
+    def set_message_reaction(
+        self, *, chat_id: int, message_id: int, emoji: str
+    ) -> None:
+        self._call(
+            "setMessageReaction",
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reaction": [{"type": "emoji", "emoji": emoji}],
+            },
+            timeout=20,
+        )
+
+
+def _message_body(message: Mapping[str, object]) -> str:
+    for key in ("text", "caption"):
+        body = message.get(key)
+        if isinstance(body, str):
+            return body
+    return ""
+
+
+def _leading_command(message: Mapping[str, object]) -> str | None:
+    """Return the message's leading bot command, or None if it has none."""
+
+    entities = message.get("entities")
+    if not isinstance(entities, list):
+        return None
+
+    for entity in entities:
+        if not isinstance(entity, Mapping):
+            continue
+        if entity.get("type") != "bot_command" or entity.get("offset") != 0:
+            continue
+        length = entity.get("length")
+        if not isinstance(length, int):
+            return None
+        # An entity length counts UTF-16 units, which matches Python slicing for
+        # a leading ASCII command. The @botname suffix is dropped rather than
+        # checked because the group runs a single bot.
+        return _message_body(message)[:length].split("@", 1)[0].lower()
+    return None
+
+
+def _sender(message: Mapping[str, object]) -> tuple[int, str] | None:
+    """Return the sender's ID and the name to show on the leaderboard."""
+
+    sender = message.get("from")
+    if not isinstance(sender, Mapping) or not isinstance(sender.get("id"), int):
+        return None
+
+    user_id = int(sender["id"])
+    for key in ("first_name", "username"):
+        value = sender.get(key)
+        if isinstance(value, str) and value:
+            return user_id, value
+    return user_id, str(user_id)
+
+
+def _send_leaderboard(
+    client: TelegramClient,
+    store: LeaderboardStore,
+    *,
+    board_chat_id: int,
+    to_chat_id: int,
+    day: str,
+) -> None:
+    """Send the board's standings to a chat, which need not be the board itself."""
+
+    standings = store.standings(chat_id=board_chat_id, local_date=day)
+    client.send_message(
+        chat_id=to_chat_id, text=format_standings(standings, local_date=day)
+    )
+
+
+def _record_submission(
+    message: Mapping[str, object],
+    *,
+    store: LeaderboardStore,
+    client: TelegramClient,
+    board_chat_id: int,
+    origin_chat_id: int,
+    message_id: int,
+    seen_at: int,
+    utc_offset_minutes: int,
+    is_private: bool,
+) -> None:
+    result = parse_result(_message_body(message))
+    if result is None:
+        return
+
+    sender = _sender(message)
+    if sender is None:
+        return
+
+    user_id, display_name = sender
+
+    # Posting in the group is itself proof of membership, so only a direct
+    # message has to be matched against the roster the bot has learned.
+    if is_private and not store.is_member(chat_id=board_chat_id, user_id=user_id):
+        LOG.info("Ignored a %s result from unrecognized user %s", result.game, user_id)
+        client.send_message(chat_id=origin_chat_id, text=_UNKNOWN_SENDER)
+        return
+
+    recorded = store.record(
+        chat_id=board_chat_id,
+        local_date=local_date(seen_at, utc_offset_minutes=utc_offset_minutes),
+        user_id=user_id,
+        display_name=display_name,
+        result=result,
+        submitted_at=seen_at,
+    )
+
+    # A direct message costs the group nothing, so it gets a written
+    # confirmation. In the group only a reaction is acceptable.
+    if not recorded:
+        LOG.info("Ignored a repeat %s result from user %s", result.game, user_id)
+        if is_private:
+            client.send_message(
+                chat_id=origin_chat_id,
+                text=f"You already submitted {result.game} today.",
+            )
+        return
+
+    if is_private:
+        client.send_message(
+            chat_id=origin_chat_id,
+            text=f"Recorded {result.game} {result.puzzle_id} - {result.score}",
+        )
+    else:
+        client.set_message_reaction(
+            chat_id=origin_chat_id, message_id=message_id, emoji=_ACKNOWLEDGEMENT
+        )
+
 
 def handle_message(
-    message: Mapping[str, object], *, cache: DuplicateCache, client: TelegramClient
+    message: Mapping[str, object],
+    *,
+    cache: DuplicateCache,
+    store: LeaderboardStore,
+    client: TelegramClient,
+    utc_offset_minutes: int,
+    board_chat_id: int | None,
 ) -> None:
     chat = message.get("chat")
     if not isinstance(chat, Mapping) or not isinstance(chat.get("id"), int):
@@ -89,8 +244,57 @@ def handle_message(
     chat_id = int(chat["id"])
     message_id = int(message["message_id"])
     seen_at = int(message.get("date", time.time()))
+    is_private = chat.get("type") == "private"
+    sender = _sender(message)
 
-    for tweet_id in extract_tweet_ids(message):
+    # Anything said in the group proves membership, which is what later lets a
+    # direct message be trusted. Group Privacy is off, so ordinary chatter counts
+    # and nobody has to post a result in the group to get on the roster.
+    if board_chat_id is not None and chat_id == board_chat_id and sender is not None:
+        store.remember_member(chat_id=board_chat_id, user_id=sender[0], seen_at=seen_at)
+
+    if _leading_command(message) == _LEADERBOARD_COMMAND:
+        if board_chat_id is None:
+            LOG.warning(
+                "Ignoring /leaderboard: set SFBOT_LEADERBOARD_CHAT_ID to the group's"
+                " chat ID. This chat's ID is %s",
+                chat_id,
+            )
+            return
+        if is_private and not (
+            sender is not None
+            and store.is_member(chat_id=board_chat_id, user_id=sender[0])
+        ):
+            client.send_message(chat_id=chat_id, text=_UNKNOWN_SENDER)
+            return
+        # The standings always come from the group's board, but the answer goes
+        # back to whoever asked, so checking from a DM stays private.
+        _send_leaderboard(
+            client,
+            store,
+            board_chat_id=board_chat_id,
+            to_chat_id=chat_id,
+            day=local_date(seen_at, utc_offset_minutes=utc_offset_minutes),
+        )
+        return
+
+    tweet_ids = extract_tweet_ids(message)
+    if not tweet_ids:
+        if board_chat_id is not None:
+            _record_submission(
+                message,
+                store=store,
+                client=client,
+                board_chat_id=board_chat_id,
+                origin_chat_id=chat_id,
+                message_id=message_id,
+                seen_at=seen_at,
+                utc_offset_minutes=utc_offset_minutes,
+                is_private=is_private,
+            )
+        return
+
+    for tweet_id in tweet_ids:
         original = cache.find_or_record(
             chat_id=chat_id,
             tweet_id=tweet_id,
@@ -104,7 +308,11 @@ def handle_message(
             client.send_sf_reply(chat_id=chat_id, message_id=original.message_id)
         except TelegramAPIError as error:
             description = error.description.lower()
-            if error.status == 400 and "repl" in description and "not found" in description:
+            if (
+                error.status == 400
+                and "repl" in description
+                and "not found" in description
+            ):
                 cache.replace_origin(
                     chat_id=chat_id,
                     tweet_id=tweet_id,
@@ -112,12 +320,51 @@ def handle_message(
                     new_message_id=message_id,
                     seen_at=seen_at,
                 )
-                LOG.info("Stored origin message was deleted; promoted message %s", message_id)
+                LOG.info(
+                    "Stored origin message was deleted; promoted message %s", message_id
+                )
                 continue
             raise
 
 
-def run_polling(client: TelegramClient, cache: DuplicateCache, *, poll_timeout: int = 30) -> None:
+def post_due_leaderboard(
+    client: TelegramClient,
+    store: LeaderboardStore,
+    *,
+    board_chat_id: int,
+    utc_offset_minutes: int,
+    post_minute: int,
+    now: int | None = None,
+) -> None:
+    """Post the day's leaderboard to the group if it is owed one."""
+
+    day = due_post_date(
+        int(time.time()) if now is None else now,
+        utc_offset_minutes=utc_offset_minutes,
+        post_minute=post_minute,
+    )
+    if not store.is_awaiting_post(chat_id=board_chat_id, local_date=day):
+        return
+
+    # Sending before marking means a failed send is retried on the next poll
+    # rather than silently swallowed.
+    _send_leaderboard(
+        client, store, board_chat_id=board_chat_id, to_chat_id=board_chat_id, day=day
+    )
+    store.mark_posted(chat_id=board_chat_id, local_date=day)
+    LOG.info("Posted the %s leaderboard to chat %s", day, board_chat_id)
+
+
+def run_polling(
+    client: TelegramClient,
+    cache: DuplicateCache,
+    store: LeaderboardStore,
+    *,
+    poll_timeout: int = 30,
+    utc_offset_minutes: int = 0,
+    board_chat_id: int | None = None,
+    post_minute: int | None = None,
+) -> None:
     offset: int | None = None
     backoff = 1
     LOG.info("sfbot is listening for messages")
@@ -130,11 +377,27 @@ def run_polling(client: TelegramClient, cache: DuplicateCache, *, poll_timeout: 
                 update_id = update.get("update_id")
                 message = update.get("message")
                 if isinstance(message, Mapping):
-                    handle_message(message, cache=cache, client=client)
+                    handle_message(
+                        message,
+                        cache=cache,
+                        store=store,
+                        client=client,
+                        utc_offset_minutes=utc_offset_minutes,
+                        board_chat_id=board_chat_id,
+                    )
                 # Only acknowledge an update after all of its side effects have
                 # succeeded. A transient sendMessage failure is then retried.
                 if isinstance(update_id, int):
                     offset = update_id + 1
+
+            if board_chat_id is not None and post_minute is not None:
+                post_due_leaderboard(
+                    client,
+                    store,
+                    board_chat_id=board_chat_id,
+                    utc_offset_minutes=utc_offset_minutes,
+                    post_minute=post_minute,
+                )
         except (TelegramAPIError, urllib.error.URLError, TimeoutError) as error:
             LOG.warning("Telegram request failed (%s); retrying in %ss", error, backoff)
             time.sleep(backoff)
