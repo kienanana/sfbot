@@ -41,6 +41,20 @@ class DuplicateCache:
         self._connection.execute(
             "CREATE INDEX IF NOT EXISTS tweet_origins_seen_at ON tweet_origins (seen_at)"
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sf_replies (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                tweet_id TEXT NOT NULL,
+                seen_at INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, message_id, tweet_id)
+            ) WITHOUT ROWID
+            """
+        )
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS sf_replies_seen_at ON sf_replies (seen_at)"
+        )
         self._connection.commit()
 
     def find_or_record(
@@ -59,6 +73,11 @@ class DuplicateCache:
 
         with self._lock, self._connection:
             self._connection.execute("DELETE FROM tweet_origins WHERE seen_at < ?", (cutoff,))
+            self._connection.execute("DELETE FROM sf_replies WHERE seen_at < ?", (cutoff,))
+            # A stale update must not trigger a reply to a newer origin after
+            # its own reply claim has aged out.
+            if seen_at < cutoff:
+                return None
             row = self._connection.execute(
                 """
                 SELECT message_id, seen_at
@@ -75,17 +94,33 @@ class DuplicateCache:
                     return None
                 return OriginalMessage(message_id=int(row[0]), seen_at=int(row[1]))
 
-            # A delayed update already outside the window cannot become a new
-            # origin, but it also should not be called a duplicate.
-            if seen_at >= cutoff:
-                self._connection.execute(
-                    """
-                    INSERT INTO tweet_origins (chat_id, tweet_id, message_id, seen_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (chat_id, tweet_id, message_id, seen_at),
-                )
+            self._connection.execute(
+                """
+                INSERT INTO tweet_origins (chat_id, tweet_id, message_id, seen_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (chat_id, tweet_id, message_id, seen_at),
+            )
             return None
+
+    def claim_reply(
+        self, *, chat_id: int, message_id: int, tweet_id: str, seen_at: int
+    ) -> bool:
+        """Claim one reply trigger durably before contacting Telegram.
+
+        A timed-out send can have reached Telegram, so retrying it could post
+        another reply. Claims intentionally survive uncertain send failures.
+        """
+
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                INSERT OR IGNORE INTO sf_replies (chat_id, message_id, tweet_id, seen_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (chat_id, message_id, tweet_id, seen_at),
+            )
+            return cursor.rowcount == 1
 
     def replace_origin(
         self, *, chat_id: int, tweet_id: str, old_message_id: int, new_message_id: int, seen_at: int
@@ -111,4 +146,3 @@ class DuplicateCache:
 
     def __exit__(self, *_: object) -> None:
         self.close()
-

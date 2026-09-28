@@ -390,6 +390,13 @@ def handle_message(
         )
         if original is None:
             continue
+        if not cache.claim_reply(
+            chat_id=chat_id,
+            message_id=message_id,
+            tweet_id=tweet_id,
+            seen_at=seen_at,
+        ):
+            continue
 
         try:
             sender_data = message.get("from")
