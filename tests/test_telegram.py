@@ -67,6 +67,36 @@ class MissingReplyClient(FakeTelegramClient):
         raise TelegramAPIError(400, "Bad Request: message to be replied not found")
 
 
+class AmbiguousCalloutClient(FakeTelegramClient):
+    """Telegram delivered the first callout, but the response was lost."""
+
+    def send_message(self, *, chat_id: int, text: str, entities=None) -> None:
+        super().send_message(chat_id=chat_id, text=text, entities=entities)
+        if len(self.sent) == 1:
+            raise TimeoutError("response lost after delivery")
+
+
+class AmbiguousReplyClient(FakeTelegramClient):
+    """Telegram delivered the reply, but the response was lost."""
+
+    def send_sf_reply(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        sender: object,
+        display_name: str | None = None,
+    ) -> None:
+        super().send_sf_reply(
+            chat_id=chat_id,
+            message_id=message_id,
+            sender=sender,
+            display_name=display_name,
+        )
+        if len(self.replies) == 1:
+            raise TimeoutError("response lost after delivery")
+
+
 class BlockedDirectMessageClient(FakeTelegramClient):
     """Refuses DMs to user 6, the way Telegram refuses someone who never started."""
 
@@ -155,6 +185,33 @@ class HandleMessageTests(unittest.TestCase):
         self.handle(second)
         self.assertEqual(self.client.replies, [(-100, 41, None)])
 
+    def test_same_person_first_share_is_silent_and_second_gets_sf(self) -> None:
+        first = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": "https://x.com/someone/status/123",
+        }
+        second = {**first, "message_id": 42, "date": 2_000_000_010}
+
+        self.handle(first, action_word="Nuke")
+        self.assertEqual(self.client.replies, [])
+        self.assertEqual(self.client.sent, [])
+
+        self.handle(second, action_word="Nuke")
+        self.handle(second, action_word="Nuke")
+        self.assertEqual(
+            self.client.replies, [(GROUP, 41, {"id": 5, "first_name": "Alice"})]
+        )
+        self.assertEqual(
+            self.client.sent,
+            [
+                (GROUP, "Uh oh! Looks like Alice's getting *Nuked*"),
+                (GROUP, "Let's drop a /NukeAlice"),
+            ],
+        )
+
     def test_an_action_word_calls_out_the_repeat_poster(self) -> None:
         first = {
             "chat": {"id": GROUP, "type": "supergroup"},
@@ -200,6 +257,7 @@ class HandleMessageTests(unittest.TestCase):
         }
         self.handle(first, action_word="Nuke", nicknames={6: "Juan"})
         self.handle(second, action_word="Nuke", nicknames={6: "Juan"})
+        self.handle(second, action_word="Nuke", nicknames={6: "Juan"})
 
         self.assertEqual(self.client.reply_names, ["Juan"])
         self.assertEqual(
@@ -215,6 +273,77 @@ class HandleMessageTests(unittest.TestCase):
 
         standings = self.store.standings(chat_id=GROUP, local_date="2033-05-18")
         self.assertEqual(standings[0].entries[0].display_name, "Juan")
+
+    def test_replayed_shares_send_one_sf_each_even_after_restart(self) -> None:
+        original = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": "https://x.com/someone/status/123",
+        }
+        shares = [
+            {
+                **original,
+                "message_id": message_id,
+                "date": 2_000_000_000 + message_id,
+                "from": {"id": 6, "first_name": "Bob"},
+            }
+            for message_id in (42, 43)
+        ]
+        self.handle(original, action_word="Nuke")
+        for share in shares + shares:
+            self.handle(share, action_word="Nuke")
+
+        self.cache.close()
+        self.cache = DuplicateCache(Path(self.temp_dir.name) / "sfbot.db")
+        for share in shares:
+            self.handle(share, action_word="Nuke")
+
+        self.assertEqual(len(self.client.replies), 2)
+        self.assertEqual([reply[1] for reply in self.client.replies], [41, 41])
+        self.assertEqual(len(self.client.sent), 4)
+
+    def test_failed_callout_does_not_repeat_sf_on_update_replay(self) -> None:
+        original = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": "https://x.com/someone/status/123",
+        }
+        share = {
+            **original,
+            "message_id": 42,
+            "date": 2_000_000_010,
+            "from": {"id": 6, "first_name": "Bob"},
+        }
+        client = AmbiguousCalloutClient()
+        self.handle(original, client=client, action_word="Nuke")
+        with self.assertRaises(TimeoutError):
+            self.handle(share, client=client, action_word="Nuke")
+
+        self.handle(share, client=client, action_word="Nuke")
+        self.assertEqual(len(client.replies), 1)
+        self.assertEqual(client.sent, [(GROUP, "Uh oh! Looks like Bob's getting *Nuked*")])
+
+    def test_ambiguous_sf_timeout_does_not_send_a_second_reply(self) -> None:
+        original = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "text": "https://x.com/someone/status/123",
+        }
+        share = {**original, "message_id": 42, "date": 2_000_000_010}
+        client = AmbiguousReplyClient()
+        self.handle(original, client=client)
+        with self.assertRaises(TimeoutError):
+            self.handle(share, client=client)
+
+        self.cache.close()
+        self.cache = DuplicateCache(Path(self.temp_dir.name) / "sfbot.db")
+        self.handle(share, client=client)
+        self.assertEqual(client.replies, [(GROUP, 41, None)])
 
     def test_without_an_action_word_only_sf_is_sent(self) -> None:
         first = {

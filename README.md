@@ -331,6 +331,9 @@ not match, and add cases to `tests/test_games.py` from real share text.
 - Game submissions and `/leaderboard` in groups are accepted only in the
   configured leaderboard group. Members of that group can also use DMs.
 - The earliest share remains the reply target for the five-day window.
+- Each repeated message triggers at most one `sf` reply per tweet, even if
+  Telegram replays the update after a restart. A send with an uncertain outcome
+  is not retried, so a failed request can leave that reply or its callout unsent.
 - If the original message was deleted, the current share becomes the new
   origin without sending an orphaned `sf` reply.
 - Text messages, media captions, and links hidden behind Telegram linked text

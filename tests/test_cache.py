@@ -56,7 +56,18 @@ class DuplicateCacheTests(unittest.TestCase):
         )
         self.assertIsNone(replay)
 
+    def test_expired_update_does_not_reply_to_a_new_origin(self) -> None:
+        self.cache.find_or_record(
+            chat_id=-1, tweet_id="10", message_id=50, seen_at=1_000, now=1_000
+        )
+        self.cache.find_or_record(
+            chat_id=-1, tweet_id="10", message_id=60, seen_at=1_101, now=1_101
+        )
+        replay = self.cache.find_or_record(
+            chat_id=-1, tweet_id="10", message_id=51, seen_at=1_001, now=1_102
+        )
+        self.assertIsNone(replay)
+
 
 if __name__ == "__main__":
     unittest.main()
-
