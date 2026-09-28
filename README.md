@@ -25,10 +25,40 @@ The past tense is the word plus `d`, so the word is expected to end in `e`. The
 asterisks are literal: the bot sends no `parse_mode`, so nothing in a display
 name ever needs escaping.
 
+The name is the person's Telegram first name unless `SFBOT_NICKNAMES` gives one
+for them; see [Nicknames](#nicknames).
+
 The canonical key is Twitter's numeric status ID. As a result, `twitter.com`
 and `x.com` links, different usernames, mobile subdomains, tracking parameters,
 and `/photo/1` suffixes all resolve to the same post. Origins are stored in an
 indexed SQLite database and scoped per Telegram chat.
+
+## Nicknames
+
+Some people go by something other than their Telegram name. `SFBOT_NICKNAMES`
+holds comma-separated `user_id:nickname` pairs and overrides the Telegram name
+everywhere the bot names someone — the `sf` reply's mention, the repeat-poster
+callout, and the leaderboard — so Bob who goes by Juan gets `/NukeJuan`:
+
+```dotenv
+SFBOT_NICKNAMES=123456789:Juan,987654321:Nikki
+```
+
+Someone with a Telegram @username is still mentioned by it, since a real
+handle pings them and a nickname cannot.
+
+The key is the numeric Telegram user ID rather than the name, because first
+names get changed and two people can share one. The IDs are not shown in the
+app either, so read them out of the logs the same way as the chat ID, with
+debug logging on:
+
+```sh
+SFBOT_LOG_LEVEL=DEBUG make run
+# ... Message from user 123456789 (Bob)
+```
+
+Anyone without an entry keeps their Telegram name. The bot is restarted for a
+change to take effect.
 
 ## Architecture
 
@@ -89,6 +119,7 @@ it in an uncommitted `.env` file:
 TELEGRAM_BOT_TOKEN=replace-with-the-real-token
 SFBOT_LEADERBOARD_CHAT_ID=-1001234567890
 SFBOT_ACTION_WORD=Nuke
+SFBOT_NICKNAMES=123456789:Juan,987654321:Nikki
 ```
 
 `SFBOT_LEADERBOARD_CHAT_ID` is the group the daily leaderboard posts to; see
@@ -292,6 +323,7 @@ not match, and add cases to `tests/test_games.py` from real share text.
 | `SFBOT_UTC_OFFSET_MINUTES` | `480` | Local day boundary for the leaderboard (480 = SGT) |
 | `SFBOT_LEADERBOARD_AT` | `21:00` | Local time of the daily post; `off` for `/leaderboard` only |
 | `SFBOT_ACTION_WORD` | Unset | Verb for the repeat-poster callout; unset sends only the `sf` mention |
+| `SFBOT_NICKNAMES` | Unset | `user_id:nickname` pairs, comma separated; overrides Telegram names |
 
 ## Behavior details
 

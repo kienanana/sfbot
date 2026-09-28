@@ -23,14 +23,21 @@ DM = 555
 class FakeTelegramClient:
     def __init__(self) -> None:
         self.replies: list[tuple[int, int, object]] = []
+        self.reply_names: list[str | None] = []
         self.sent: list[tuple[int, str]] = []
         self.sent_entities: list[list[dict[str, object]] | None] = []
         self.reactions: list[tuple[int, int, str]] = []
 
     def send_sf_reply(
-        self, *, chat_id: int, message_id: int, sender: object
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        sender: object,
+        display_name: str | None = None,
     ) -> None:
         self.replies.append((chat_id, message_id, sender))
+        self.reply_names.append(display_name)
 
     def send_message(
         self,
@@ -50,7 +57,12 @@ class FakeTelegramClient:
 
 class MissingReplyClient(FakeTelegramClient):
     def send_sf_reply(
-        self, *, chat_id: int, message_id: int, sender: object
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        sender: object,
+        display_name: str | None = None,
     ) -> None:
         raise TelegramAPIError(400, "Bad Request: message to be replied not found")
 
@@ -93,6 +105,7 @@ class HandleMessageTests(unittest.TestCase):
         client: FakeTelegramClient | None = None,
         board_chat_id: int | None = GROUP,
         action_word: str | None = None,
+        nicknames: dict[int, str] | None = None,
     ) -> None:
         handle_message(
             message,  # type: ignore[arg-type]
@@ -102,10 +115,17 @@ class HandleMessageTests(unittest.TestCase):
             utc_offset_minutes=SGT_OFFSET,
             board_chat_id=board_chat_id,
             action_word=action_word,
+            nicknames={} if nicknames is None else nicknames,
         )
 
     def dm(
-        self, text: str, *, user_id: int = 5, name: str = "Alice", message_id: int = 7
+        self,
+        text: str,
+        *,
+        user_id: int = 5,
+        name: str = "Alice",
+        message_id: int = 7,
+        nicknames: dict[int, str] | None = None,
     ) -> None:
         self.handle(
             {
@@ -114,7 +134,8 @@ class HandleMessageTests(unittest.TestCase):
                 "date": 2_000_000_000,
                 "from": {"id": user_id, "first_name": name},
                 "text": text,
-            }
+            },
+            nicknames=nicknames,
         )
 
     def test_duplicate_replies_to_original_message(self) -> None:
@@ -162,6 +183,38 @@ class HandleMessageTests(unittest.TestCase):
                 (GROUP, "Let's drop a /NukeBob"),
             ],
         )
+
+    def test_a_nickname_replaces_the_name_in_the_callout(self) -> None:
+        first = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": "https://x.com/someone/status/123",
+        }
+        second = {
+            **first,
+            "message_id": 99,
+            "date": 2_000_000_010,
+            "from": {"id": 6, "first_name": "Bob"},
+        }
+        self.handle(first, action_word="Nuke", nicknames={6: "Juan"})
+        self.handle(second, action_word="Nuke", nicknames={6: "Juan"})
+
+        self.assertEqual(self.client.reply_names, ["Juan"])
+        self.assertEqual(
+            self.client.sent,
+            [
+                (GROUP, "Uh oh! Looks like Juan's getting *Nuked*"),
+                (GROUP, "Let's drop a /NukeJuan"),
+            ],
+        )
+
+    def test_a_nickname_is_the_name_on_the_board(self) -> None:
+        self.dm("Wordle 1,234 3/6", nicknames={5: "Juan"})
+
+        standings = self.store.standings(chat_id=GROUP, local_date="2033-05-18")
+        self.assertEqual(standings[0].entries[0].display_name, "Juan")
 
     def test_without_an_action_word_only_sf_is_sent(self) -> None:
         first = {
@@ -318,8 +371,8 @@ class HandleMessageTests(unittest.TestCase):
                     (
                         entity["url"],
                         encoded[
-                            2 * int(entity["offset"]):
-                            2 * (int(entity["offset"]) + int(entity["length"]))
+                            2 * int(entity["offset"]) : 2
+                            * (int(entity["offset"]) + int(entity["length"]))
                         ].decode("utf-16-le"),
                     )
                     for entity in entities
@@ -473,6 +526,32 @@ class TelegramClientTests(unittest.TestCase):
         self.assertEqual(payload["reply_parameters"]["message_id"], 41)
         self.assertNotIn("entities", payload)
 
+    def test_sf_reply_mentions_a_nickname_instead_of_the_telegram_name(self) -> None:
+        client = TelegramClient("test")
+        with patch.object(client, "_call") as call:
+            client.send_sf_reply(
+                chat_id=GROUP,
+                message_id=41,
+                sender={"id": 6, "first_name": "Bob"},
+                display_name="Juan",
+            )
+
+        payload = call.call_args.args[1]
+        self.assertEqual(payload["text"], "sf @Juan")
+        self.assertEqual(payload["entities"][0]["user"]["first_name"], "Juan")
+
+    def test_sf_reply_prefers_a_real_username_to_a_nickname(self) -> None:
+        client = TelegramClient("test")
+        with patch.object(client, "_call") as call:
+            client.send_sf_reply(
+                chat_id=GROUP,
+                message_id=41,
+                sender={"id": 6, "first_name": "Bob", "username": "bob"},
+                display_name="Juan",
+            )
+
+        self.assertEqual(call.call_args.args[1]["text"], "sf @bob")
+
     def test_sf_reply_mentions_a_user_without_a_username(self) -> None:
         client = TelegramClient("test")
         with patch.object(client, "_call") as call:
@@ -577,7 +656,10 @@ class SendDueRemindersTests(unittest.TestCase):
             ("Wordle 1,234 3/6", "Alice"),
             ("Krillion #7\n1,200", "Alice"),
             ("Fermi 42\n1.0\u00d7 score", "Alice"),
-            ("Connections\nPuzzle #99\n\U0001f7e8\U0001f7e8\U0001f7e8\U0001f7e8", "Alice"),
+            (
+                "Connections\nPuzzle #99\n\U0001f7e8\U0001f7e8\U0001f7e8\U0001f7e8",
+                "Alice",
+            ),
         ):
             self.record(text, user_id=5, name=name)
 

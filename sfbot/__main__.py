@@ -63,6 +63,32 @@ def _action_word() -> str | None:
     return raw or None
 
 
+def _nicknames() -> dict[int, str]:
+    """Return the nickname to call each user by, empty when unconfigured.
+
+    Keyed by user ID rather than name because Telegram first names get changed
+    and collide. Run with SFBOT_LOG_LEVEL=DEBUG to have every group message log
+    the ID behind its sender's name.
+    """
+
+    raw = os.environ.get("SFBOT_NICKNAMES", "").strip()
+    if not raw:
+        return {}
+
+    nicknames: dict[int, str] = {}
+    for entry in raw.split(","):
+        user_id, separator, nickname = entry.partition(":")
+        if not separator or not nickname.strip():
+            raise SystemExit("SFBOT_NICKNAMES entries must be user_id:nickname")
+        try:
+            nicknames[int(user_id)] = nickname.strip()
+        except ValueError as error:
+            raise SystemExit(
+                f"SFBOT_NICKNAMES user IDs must be integers, not {user_id.strip()!r}"
+            ) from error
+    return nicknames
+
+
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -78,6 +104,7 @@ def main() -> None:
     board_chat_id = _board_chat_id()
     post_minute = _post_minute()
     action_word = _action_word()
+    nicknames = _nicknames()
     database_path = Path(os.environ.get("SFBOT_DB_PATH", "data/sfbot.db"))
 
     if board_chat_id is None:
@@ -101,6 +128,7 @@ def main() -> None:
             board_chat_id=board_chat_id,
             post_minute=post_minute,
             action_word=action_word,
+            nicknames=nicknames,
         )
 
 

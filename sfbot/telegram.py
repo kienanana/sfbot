@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Any
 
 from .cache import DuplicateCache
@@ -25,6 +26,7 @@ _UNKNOWN_SENDER = (
     "I don't have you on the group roster yet. Say anything in the group chat,"
     " then send this again."
 )
+_NO_NICKNAMES: Mapping[int, str] = MappingProxyType({})
 
 
 class TelegramAPIError(RuntimeError):
@@ -76,16 +78,22 @@ class TelegramClient:
         return result if isinstance(result, list) else []
 
     def send_sf_reply(
-        self, *, chat_id: int, message_id: int, sender: Mapping[str, object] | None
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        sender: Mapping[str, object] | None,
+        display_name: str | None = None,
     ) -> None:
         text = "sf"
         entities: list[dict[str, object]] = []
         if sender is not None and isinstance(sender.get("id"), int):
             username = sender.get("username")
             if isinstance(username, str) and username:
+                # A real @handle pings them, so it beats any name the bot has.
                 text += f" @{username}"
             else:
-                name = sender.get("first_name")
+                name = display_name or sender.get("first_name")
                 if not isinstance(name, str) or not name:
                     name = str(sender["id"])
                 mention = f"@{name}"
@@ -212,14 +220,23 @@ def _leading_command(message: Mapping[str, object]) -> str | None:
     return None
 
 
-def _sender(message: Mapping[str, object]) -> tuple[int, str] | None:
-    """Return the sender's ID and the name to show on the leaderboard."""
+def _sender(
+    message: Mapping[str, object], nicknames: Mapping[int, str]
+) -> tuple[int, str] | None:
+    """Return the sender's ID and the name the bot calls them by.
+
+    A configured nickname wins over the Telegram name everywhere the bot names
+    someone, which is the leaderboard and the repeat-poster callout.
+    """
 
     sender = message.get("from")
     if not isinstance(sender, Mapping) or not isinstance(sender.get("id"), int):
         return None
 
     user_id = int(sender["id"])
+    nickname = nicknames.get(user_id)
+    if nickname:
+        return user_id, nickname
     for key in ("first_name", "username"):
         value = sender.get(key)
         if isinstance(value, str) and value:
@@ -254,12 +271,13 @@ def _record_submission(
     seen_at: int,
     utc_offset_minutes: int,
     is_private: bool,
+    nicknames: Mapping[int, str],
 ) -> None:
     result = parse_result(_message_body(message))
     if result is None:
         return
 
-    sender = _sender(message)
+    sender = _sender(message, nicknames)
     if sender is None:
         return
 
@@ -312,6 +330,7 @@ def handle_message(
     utc_offset_minutes: int,
     board_chat_id: int | None,
     action_word: str | None = None,
+    nicknames: Mapping[int, str] = _NO_NICKNAMES,
 ) -> None:
     chat = message.get("chat")
     if not isinstance(chat, Mapping) or not isinstance(chat.get("id"), int):
@@ -324,7 +343,10 @@ def handle_message(
     seen_at = int(message.get("date", time.time()))
     is_private = chat.get("type") == "private"
     is_board_group = board_chat_id is not None and chat_id == board_chat_id
-    sender = _sender(message)
+    sender = _sender(message, nicknames)
+    if sender is not None:
+        # The only way to learn the user IDs that SFBOT_NICKNAMES is keyed by.
+        LOG.debug("Message from user %s (%s)", sender[0], sender[1])
 
     # Anything said in the group proves membership, which is what later lets a
     # direct message be trusted. Group Privacy is off, so ordinary chatter counts
@@ -378,6 +400,7 @@ def handle_message(
                 seen_at=seen_at,
                 utc_offset_minutes=utc_offset_minutes,
                 is_private=is_private,
+                nicknames=nicknames,
             )
         return
 
@@ -397,6 +420,7 @@ def handle_message(
                 chat_id=chat_id,
                 message_id=original.message_id,
                 sender=sender_data if isinstance(sender_data, Mapping) else None,
+                display_name=None if sender is None else sender[1],
             )
         except TelegramAPIError as error:
             description = error.description.lower()
@@ -513,6 +537,7 @@ def run_polling(
     board_chat_id: int | None = None,
     post_minute: int | None = None,
     action_word: str | None = None,
+    nicknames: Mapping[int, str] = _NO_NICKNAMES,
 ) -> None:
     offset: int | None = None
     backoff = 1
@@ -534,6 +559,7 @@ def run_polling(
                         utc_offset_minutes=utc_offset_minutes,
                         board_chat_id=board_chat_id,
                         action_word=action_word,
+                        nicknames=nicknames,
                     )
                 # Only acknowledge an update after all of its side effects have
                 # succeeded. A transient sendMessage failure is then retried.
