@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from itertools import groupby
 from pathlib import Path
@@ -171,13 +172,19 @@ class LeaderboardStore:
             )
         return cursor.rowcount == 1
 
-    def standings(self, *, chat_id: int, local_date: str) -> list[GameStandings]:
+    def standings(
+        self,
+        *,
+        chat_id: int,
+        local_date: str,
+        nicknames: Mapping[int, str] | None = None,
+    ) -> list[GameStandings]:
         """Return one board per game and puzzle, ordered best result first."""
 
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT game, puzzle_id, display_name, score, rank_key
+                SELECT game, puzzle_id, user_id, display_name, score, rank_key
                 FROM game_results
                 WHERE chat_id = ? AND local_date = ?
                 ORDER BY game, puzzle_id, rank_key, submitted_at
@@ -185,6 +192,7 @@ class LeaderboardStore:
                 (chat_id, local_date),
             ).fetchall()
 
+        current_nicknames = nicknames if nicknames is not None else {}
         boards: list[GameStandings] = []
         for (game, puzzle_id), game_rows in groupby(
             rows, key=lambda row: (row[0], row[1])
@@ -196,9 +204,9 @@ class LeaderboardStore:
                     puzzle_id=str(puzzle_id),
                     entries=tuple(
                         Entry(
-                            display_name=str(row[2]),
-                            score=str(row[3]),
-                            rank_key=float(row[4]),
+                            display_name=current_nicknames.get(int(row[2]), str(row[3])),
+                            score=str(row[4]),
+                            rank_key=float(row[5]),
                         )
                         for row in grouped
                     ),
