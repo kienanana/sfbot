@@ -272,7 +272,21 @@ class HandleMessageTests(unittest.TestCase):
         self.dm("Wordle 1,234 3/6", nicknames={5: "Juan"})
 
         standings = self.store.standings(chat_id=GROUP, local_date="2033-05-18")
-        self.assertEqual(standings[0].entries[0].display_name, "Juan")
+        self.assertEqual(standings[0].entries[0].display_name, "Alice")
+
+        command = "/leaderboard"
+        self.handle(
+            {
+                "chat": {"id": DM, "type": "private"},
+                "message_id": 8,
+                "date": 2_000_000_100,
+                "from": {"id": 5, "first_name": "Alice"},
+                "text": command,
+                "entities": command_entity(command),
+            },
+            nicknames={5: "Nikki"},
+        )
+        self.assertIn("Nikki - 3/6", self.client.sent[-1][1])
 
     def test_replayed_shares_send_one_sf_each_even_after_restart(self) -> None:
         original = {
@@ -816,7 +830,7 @@ class PostDueLeaderboardTests(unittest.TestCase):
         self.store.close()
         self.temp_dir.cleanup()
 
-    def post(self, now: int) -> None:
+    def post(self, now: int, *, nicknames: dict[int, str] | None = None) -> None:
         post_due_leaderboard(
             self.client,  # type: ignore[arg-type]
             self.store,
@@ -824,6 +838,7 @@ class PostDueLeaderboardTests(unittest.TestCase):
             utc_offset_minutes=SGT_OFFSET,
             post_minute=21 * 60,
             now=now,
+            nicknames={} if nicknames is None else nicknames,
         )
 
     def test_the_group_is_posted_to_once_per_day(self) -> None:
@@ -849,6 +864,22 @@ class PostDueLeaderboardTests(unittest.TestCase):
     def test_nothing_is_posted_when_no_results_exist(self) -> None:
         self.post(2_000_035_800)
         self.assertEqual(self.client.sent, [])
+
+    def test_scheduled_post_uses_the_current_nickname(self) -> None:
+        result = parse_result("Wordle 1,234 3/6")
+        assert result is not None
+        self.store.record(
+            chat_id=GROUP,
+            local_date="2033-05-18",
+            user_id=5,
+            display_name="Alice",
+            result=result,
+            submitted_at=2_000_000_000,
+        )
+
+        self.post(2_000_035_800, nicknames={5: "Juan"})
+
+        self.assertIn("Juan - 3/6", self.client.sent[0][1])
 
 
 if __name__ == "__main__":

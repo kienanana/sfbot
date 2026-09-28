@@ -251,10 +251,13 @@ def _send_leaderboard(
     board_chat_id: int,
     to_chat_id: int,
     day: str,
+    nicknames: Mapping[int, str],
 ) -> None:
     """Send the board's standings to a chat, which need not be the board itself."""
 
-    standings = store.standings(chat_id=board_chat_id, local_date=day)
+    standings = store.standings(
+        chat_id=board_chat_id, local_date=day, nicknames=nicknames
+    )
     client.send_message(
         chat_id=to_chat_id, text=format_standings(standings, local_date=day)
     )
@@ -271,13 +274,14 @@ def _record_submission(
     seen_at: int,
     utc_offset_minutes: int,
     is_private: bool,
-    nicknames: Mapping[int, str],
 ) -> None:
     result = parse_result(_message_body(message))
     if result is None:
         return
 
-    sender = _sender(message, nicknames)
+    # Keep Telegram's name in storage so config changes also affect scores
+    # submitted before the change. The nickname is applied when rendering.
+    sender = _sender(message, _NO_NICKNAMES)
     if sender is None:
         return
 
@@ -384,6 +388,7 @@ def handle_message(
             board_chat_id=board_chat_id,
             to_chat_id=chat_id,
             day=local_date(seen_at, utc_offset_minutes=utc_offset_minutes),
+            nicknames=nicknames,
         )
         return
 
@@ -400,7 +405,6 @@ def handle_message(
                 seen_at=seen_at,
                 utc_offset_minutes=utc_offset_minutes,
                 is_private=is_private,
-                nicknames=nicknames,
             )
         return
 
@@ -464,6 +468,7 @@ def post_due_leaderboard(
     utc_offset_minutes: int,
     post_minute: int,
     now: int | None = None,
+    nicknames: Mapping[int, str] = _NO_NICKNAMES,
 ) -> None:
     """Post the day's leaderboard to the group if it is owed one."""
 
@@ -478,7 +483,12 @@ def post_due_leaderboard(
     # Sending before marking means a failed send is retried on the next poll
     # rather than silently swallowed.
     _send_leaderboard(
-        client, store, board_chat_id=board_chat_id, to_chat_id=board_chat_id, day=day
+        client,
+        store,
+        board_chat_id=board_chat_id,
+        to_chat_id=board_chat_id,
+        day=day,
+        nicknames=nicknames,
     )
     store.mark_posted(chat_id=board_chat_id, local_date=day)
     LOG.info("Posted the %s leaderboard to chat %s", day, board_chat_id)
@@ -587,6 +597,7 @@ def run_polling(
                     board_chat_id=board_chat_id,
                     utc_offset_minutes=utc_offset_minutes,
                     post_minute=post_minute,
+                    nicknames=nicknames,
                 )
         except (TelegramAPIError, urllib.error.URLError, TimeoutError) as error:
             LOG.warning("Telegram request failed (%s); retrying in %ss", error, backoff)

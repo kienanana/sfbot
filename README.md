@@ -58,7 +58,8 @@ SFBOT_LOG_LEVEL=DEBUG make run
 ```
 
 Anyone without an entry keeps their Telegram name. The bot is restarted for a
-change to take effect.
+change to take effect. The current nickname also appears for scores submitted
+before the change.
 
 ## Architecture
 
