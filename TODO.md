@@ -16,7 +16,7 @@ acceptable.
 ## P0 — Runtime reliability
 
 - [ ] Persist the last successfully processed Telegram update ID in SQLite.
-- [ ] Prevent a replayed duplicate update from sending a second `sf` response.
+- [x] Prevent a replayed duplicate update from sending a second `sf` response.
 - [ ] Catch up daily posts missed during outages longer than one day.
 - [ ] Isolate failures per update so one malformed message cannot stop polling.
 - [ ] Handle `SIGINT` and `SIGTERM` cleanly and close SQLite before exiting.
