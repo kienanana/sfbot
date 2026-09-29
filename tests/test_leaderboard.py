@@ -360,13 +360,13 @@ class FormatChadTests(unittest.TestCase):
         solo = [self.board("Wordle", "Alice")]
         tied = [self.board("Wordle", "Alice", "Bob"), self.board("Fermi", "Bob", "Alice")]
         singular_lines = [
-            format_chad(solo, variation=i).split("\n", 1)[1] for i in range(15)
+            format_chad(solo, variation=i).split("\n", 1)[1] for i in range(16)
         ]
         plural_lines = [
-            format_chad(tied, variation=i).split("\n", 1)[1] for i in range(13)
+            format_chad(tied, variation=i).split("\n", 1)[1] for i in range(14)
         ]
-        self.assertEqual(len(set(singular_lines)), 15)
-        self.assertEqual(len(set(plural_lines)), 13)
+        self.assertEqual(len(set(singular_lines)), 16)
+        self.assertEqual(len(set(plural_lines)), 14)
         self.assertEqual(
             set(singular_lines) | set(plural_lines),
             {
@@ -386,6 +386,7 @@ class FormatChadTests(unittest.TestCase):
                 "that's super hot! 🔥",
                 "everybody clap. 👏",
                 "it's like everyone else didn't even try!",
+                "*feels the aura* 😈",
             },
         )
         self.assertIn("we gotta audit this guy. 🔎", singular_lines)
