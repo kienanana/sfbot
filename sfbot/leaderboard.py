@@ -360,25 +360,26 @@ def _named_winners(names: list[str]) -> str:
 
 
 _CHAD_LINES_BOTH = (
-    "i hope your parents are proud of you!",
-    "the big leagues are calling!",
+    "i hope your parents are proud of you! 🥹",
+    "the big leagues are calling! 📞",
     "awwwww",
     "chill out! it's just a game!",
-    "touch grass!",
+    "touch grass! 🌱",
     "cool.",
-    "congratulations!",
+    "congratulations! 🎉",
     "wahoo!",
     "yippee!",
-    "that's super hot!",
-    "everybody clap.",
+    "that's super hot! 🔥",
+    "everybody clap. 👏",
     "it's like everyone else didn't even try!",
+    "*feels the aura* 😈",
 )
 _CHAD_LINES_SINGULAR = (
-    "we gotta audit this guy.",
+    "we gotta audit this guy. 🔎",
     "you're the alpha of the pack! 🐺",
     "i'm from tel aviv and this is my favourite quizzer!",
 )
-_CHAD_LINES_PLURAL = ("are you guys poly?",)
+_CHAD_LINES_PLURAL = ("are you guys poly? 👀",)
 
 
 def format_chad(standings: list[GameStandings], *, variation: int = 0) -> str | None:

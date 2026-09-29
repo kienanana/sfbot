@@ -278,7 +278,7 @@ class FormatChudTests(unittest.TestCase):
         ]
         # Alice 6, Bob 8, Cara 10 - one bad game is not enough to sink Alice.
         self.assertEqual(
-            format_chud(boards), "Ding ding ding! Cara is the CHUD of the day!"
+            format_chud(boards), "🚽 Ding ding ding! Cara is the CHUD of the day!"
         )
 
     def test_sitting_a_game_out_is_worse_than_losing_it(self) -> None:
@@ -288,7 +288,7 @@ class FormatChudTests(unittest.TestCase):
         ]
         # Cara skipped Fermi, which costs more than Bob's last place on it.
         self.assertEqual(
-            format_chud(boards), "Ding ding ding! Cara is the CHUD of the day!"
+            format_chud(boards), "🚽 Ding ding ding! Cara is the CHUD of the day!"
         )
 
     def test_a_shared_placement_spares_nobody(self) -> None:
@@ -331,7 +331,7 @@ class FormatChadTests(unittest.TestCase):
         ]
         self.assertTrue(
             format_chad(boards, variation=0).startswith(
-                "Ding ding ding! Alice is the CHAD of the day!\n"
+                "👑 Ding ding ding! Alice is the CHAD of the day!\n"
             )
         )
 
@@ -343,7 +343,7 @@ class FormatChadTests(unittest.TestCase):
         ]
         self.assertTrue(
             format_chad(boards).startswith(
-                "Ding ding ding! Bob is the CHAD of the day!\n"
+                "👑 Ding ding ding! Bob is the CHAD of the day!\n"
             )
         )
 
@@ -352,7 +352,7 @@ class FormatChadTests(unittest.TestCase):
         boards.append(self.board("Fermi", "Bob", "Alice"))
         self.assertTrue(
             format_chad(boards).startswith(
-                "Ding ding ding! Alice and Bob are the CHADs of the day!\n"
+                "👑 Ding ding ding! Alice and Bob are the CHADs of the day!\n"
             )
         )
 
@@ -370,30 +370,30 @@ class FormatChadTests(unittest.TestCase):
         self.assertEqual(
             set(singular_lines) | set(plural_lines),
             {
-                "we gotta audit this guy.",
-                "i hope your parents are proud of you!",
+                "we gotta audit this guy. 🔎",
+                "i hope your parents are proud of you! 🥹",
                 "you're the alpha of the pack! 🐺",
-                "the big leagues are calling!",
-                "are you guys poly?",
+                "the big leagues are calling! 📞",
+                "are you guys poly? 👀",
                 "awwwww",
                 "chill out! it's just a game!",
-                "touch grass!",
+                "touch grass! 🌱",
                 "i'm from tel aviv and this is my favourite quizzer!",
                 "cool.",
-                "congratulations!",
+                "congratulations! 🎉",
                 "wahoo!",
                 "yippee!",
-                "that's super hot!",
-                "everybody clap.",
+                "that's super hot! 🔥",
+                "everybody clap. 👏",
                 "it's like everyone else didn't even try!",
             },
         )
-        self.assertIn("we gotta audit this guy.", singular_lines)
+        self.assertIn("we gotta audit this guy. 🔎", singular_lines)
         self.assertIn("you're the alpha of the pack! 🐺", singular_lines)
         self.assertIn("i'm from tel aviv and this is my favourite quizzer!", singular_lines)
-        self.assertIn("are you guys poly?", plural_lines)
-        self.assertNotIn("are you guys poly?", singular_lines)
-        self.assertNotIn("we gotta audit this guy.", plural_lines)
+        self.assertIn("are you guys poly? 👀", plural_lines)
+        self.assertNotIn("are you guys poly? 👀", singular_lines)
+        self.assertNotIn("we gotta audit this guy. 🔎", plural_lines)
 
 
 if __name__ == "__main__":

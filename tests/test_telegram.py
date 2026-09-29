@@ -529,7 +529,7 @@ class HandleMessageTests(unittest.TestCase):
         )
         chad, chud = self.client.sent[1:]
         self.assertIn("Alice is the CHAD of the day!", chad[1])
-        self.assertEqual(chud[1], "Ding ding ding! Bob is the CHUD of the day!")
+        self.assertEqual(chud[1], "🚽 Ding ding ding! Bob is the CHUD of the day!")
         self.client.sent.clear()
 
         # A result that arrives after the post must not revise either winner.
@@ -947,7 +947,7 @@ class PostDueLeaderboardTests(unittest.TestCase):
 
         self.assertEqual(
             self.client.sent[2],
-            (GROUP, "Ding ding ding! Bob is the CHUD of the day!"),
+            (GROUP, "🚽 Ding ding ding! Bob is the CHUD of the day!"),
         )
         self.assertIn("Alice is the CHAD of the day!", self.client.sent[1][1])
 
