@@ -36,10 +36,23 @@ class ParseResultTests(unittest.TestCase):
         self.assertEqual(result.game, "Krillion")
         self.assertEqual(result.puzzle_id, "74")
         self.assertEqual(result.score, "465")
+        # The per-answer emoji run is kept for the board.
+        self.assertEqual(
+            result.detail,
+            "\U0001f41f\U0001f3ee\U0001f991\U0001f3ee\U0001f991\U0001f991\U0001f3ee",
+        )
         # A deeper dive scores higher, so it must sort ahead of a shallow one.
         shallow = parse_result("Krillion #74 \U0001f990\n120")
         assert shallow is not None
         self.assertLess(result.rank_key, shallow.rank_key)
+
+    def test_krillion_dive_emoji_stops_at_the_share_link(self) -> None:
+        result = parse_result(
+            "Krillion #74 \U0001f990\n465\n\n"
+            "\U0001f41f\U0001f991\n\nhttps://krillion.io/s/74"
+        )
+        assert result is not None
+        self.assertEqual(result.detail, "\U0001f41f\U0001f991")
 
     def test_fermi_share_text_ranks_a_smaller_error_first(self) -> None:
         text = (
@@ -53,12 +66,14 @@ class ParseResultTests(unittest.TestCase):
         assert result is not None
         self.assertEqual(result.game, "Fermi")
         self.assertEqual(result.puzzle_id, "63")
-        self.assertEqual(result.score, "241×")
+        # The total leads, with each question's multiplier broken out after it.
+        self.assertEqual(result.score, "241× (14.0×, 12,870×, 33,500,000,000×)")
         self.assertEqual(result.rank_key, 241.0)
 
         # The per-question lines must not be mistaken for the total.
         near_perfect = parse_result("Fermi · No. 63\n01  1.1×\n1.4× score")
         assert near_perfect is not None
+        self.assertEqual(near_perfect.score, "1.4× (1.1×)")
         self.assertEqual(near_perfect.rank_key, 1.4)
         self.assertLess(near_perfect.rank_key, result.rank_key)
 
@@ -80,13 +95,43 @@ class ParseResultTests(unittest.TestCase):
                 2,
             ),
         ]
-        for text, score, rank_key in cases:
+        for text, score, mistakes in cases:
             result = parse_result(text)
             assert result is not None
             self.assertEqual(result.game, "Connections")
             self.assertEqual(result.puzzle_id, "1204")
             self.assertEqual(result.score, score)
-            self.assertEqual(result.rank_key, rank_key)
+            self.assertEqual(result.detail, f"{yellow}{green}{blue}{purple}")
+            # The solve order only nudges the rank inside its mistake count.
+            self.assertEqual(int(result.rank_key), mistakes)
+
+    def test_connections_ranks_a_harder_solve_order_first(self) -> None:
+        yellow, green, blue, purple = (
+            "\U0001f7e8",
+            "\U0001f7e9",
+            "\U0001f7e6",
+            "\U0001f7ea",
+        )
+        header = "Connections\nPuzzle #1204\n"
+
+        def perfect(*colours: str) -> float:
+            rows = "\n".join(colour * 4 for colour in colours)
+            result = parse_result(f"{header}{rows}")
+            assert result is not None
+            self.assertEqual(result.detail, "".join(colours))
+            return result.rank_key
+
+        hardest_first = perfect(purple, blue, green, yellow)
+        easiest_first = perfect(yellow, green, blue, purple)
+        self.assertLess(hardest_first, easiest_first)
+
+        # However impressive the order, a perfect round still beats a mistake.
+        blemished = parse_result(
+            f"{header}{yellow * 3}{green}\n"
+            + "\n".join(colour * 4 for colour in (purple, blue, green, yellow))
+        )
+        assert blemished is not None
+        self.assertLess(easiest_first, blemished.rank_key)
 
     def test_connections_reports_four_mistakes_as_a_loss(self) -> None:
         text = (
@@ -99,8 +144,9 @@ class ParseResultTests(unittest.TestCase):
         result = parse_result(text)
         assert result is not None
         self.assertEqual(result.score, "lost")
+        self.assertEqual(result.detail, "")
         # The game ends at four mistakes, so a loss already sorts last.
-        self.assertEqual(result.rank_key, 4)
+        self.assertGreaterEqual(result.rank_key, 4)
 
     def test_unrelated_text_is_not_a_result(self) -> None:
         self.assertIsNone(parse_result(""))

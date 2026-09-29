@@ -17,6 +17,7 @@ class Entry:
     display_name: str
     score: str
     rank_key: float
+    detail: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,10 +49,19 @@ class LeaderboardStore:
                 score TEXT NOT NULL,
                 rank_key REAL NOT NULL,
                 submitted_at INTEGER NOT NULL,
+                detail TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (chat_id, local_date, game, user_id)
             ) WITHOUT ROWID
             """
         )
+        columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(game_results)")
+        }
+        if "detail" not in columns:
+            self._connection.execute(
+                "ALTER TABLE game_results ADD COLUMN detail TEXT NOT NULL DEFAULT ''"
+            )
         self._connection.execute(
             "CREATE INDEX IF NOT EXISTS game_results_local_date ON game_results (local_date)"
         )
@@ -154,9 +164,9 @@ class LeaderboardStore:
                 """
                 INSERT OR IGNORE INTO game_results (
                     chat_id, local_date, game, user_id, display_name,
-                    puzzle_id, score, rank_key, submitted_at
+                    puzzle_id, score, rank_key, submitted_at, detail
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     chat_id,
@@ -168,6 +178,7 @@ class LeaderboardStore:
                     result.score,
                     result.rank_key,
                     submitted_at,
+                    result.detail,
                 ),
             )
         return cursor.rowcount == 1
@@ -184,7 +195,7 @@ class LeaderboardStore:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT game, puzzle_id, user_id, display_name, score, rank_key
+                SELECT game, puzzle_id, user_id, display_name, score, rank_key, detail
                 FROM game_results
                 WHERE chat_id = ? AND local_date = ?
                 ORDER BY game, puzzle_id, rank_key, submitted_at
@@ -204,9 +215,12 @@ class LeaderboardStore:
                     puzzle_id=str(puzzle_id),
                     entries=tuple(
                         Entry(
-                            display_name=current_nicknames.get(int(row[2]), str(row[3])),
+                            display_name=current_nicknames.get(
+                                int(row[2]), str(row[3])
+                            ),
                             score=str(row[4]),
                             rank_key=float(row[5]),
+                            detail=str(row[6]),
                         )
                         for row in grouped
                     ),
@@ -297,5 +311,8 @@ def format_standings(standings: list[GameStandings], *, local_date: str) -> str:
                 place = index
                 previous_rank = entry.rank_key
             crown = " 👑" if place == 1 else ""
-            lines.append(f"{place}.{crown} {entry.display_name} - {entry.score}")
+            detail = f" {entry.detail}" if entry.detail else ""
+            lines.append(
+                f"{place}.{crown} {entry.display_name}{detail} - {entry.score}"
+            )
     return "\n".join(lines)
