@@ -70,10 +70,20 @@ class LeaderboardStore:
             CREATE TABLE IF NOT EXISTS posted_days (
                 chat_id INTEGER NOT NULL,
                 local_date TEXT NOT NULL,
+                chad_message TEXT,
+                chud_message TEXT,
                 PRIMARY KEY (chat_id, local_date)
             ) WITHOUT ROWID
             """
         )
+        posted_columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(posted_days)")
+        }
+        for column in ("chad_message", "chud_message"):
+            if column not in posted_columns:
+                self._connection.execute(
+                    f"ALTER TABLE posted_days ADD COLUMN {column} TEXT"
+                )
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS reminded_days (
@@ -246,15 +256,40 @@ class LeaderboardStore:
             ).fetchone()
         return bool(row[0])
 
-    def mark_posted(self, *, chat_id: int, local_date: str) -> bool:
+    def mark_posted(
+        self,
+        *,
+        chat_id: int,
+        local_date: str,
+        chad_message: str | None = None,
+        chud_message: str | None = None,
+    ) -> bool:
         """Record that a chat's daily post is done, returning False if it already was."""
 
         with self._lock, self._connection:
             cursor = self._connection.execute(
-                "INSERT OR IGNORE INTO posted_days (chat_id, local_date) VALUES (?, ?)",
-                (chat_id, local_date),
+                """INSERT OR IGNORE INTO posted_days
+                   (chat_id, local_date, chad_message, chud_message)
+                   VALUES (?, ?, ?, ?)""",
+                (chat_id, local_date, chad_message, chud_message),
             )
         return cursor.rowcount == 1
+
+    def posted_messages(
+        self, *, chat_id: int, local_date: str
+    ) -> tuple[str | None, str | None] | None:
+        """Return the announcements for a posted day, or None if undecided.
+
+        Older posted days have no saved announcement texts.
+        """
+
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT chad_message, chud_message FROM posted_days
+                   WHERE chat_id = ? AND local_date = ?""",
+                (chat_id, local_date),
+            ).fetchone()
+        return (row[0], row[1]) if row is not None else None
 
     def is_awaiting_reminder(self, *, chat_id: int, local_date: str) -> bool:
         """Return whether a day's reminder round has not been sent yet."""
@@ -301,21 +336,12 @@ def _placings(entries: Sequence[Entry]) -> list[int]:
     return places
 
 
-def format_chud(standings: list[GameStandings]) -> str | None:
-    """Name whoever did worst across the day's games, or None if nobody played.
-
-    Everyone who turned up on any board is scored on all of them: a game
-    somebody sat out counts as one worse than its last place, so skipping is
-    the chuddiest move available. Nothing separates a tie, so it is shared.
-    """
-
+def _total_placings(standings: list[GameStandings]) -> dict[str, int]:
+    """Sum placements across boards; skipping costs one worse than last place."""
     totals: dict[str, int] = {}
     for board in standings:
         for entry in board.entries:
             totals.setdefault(entry.display_name, 0)
-    if not totals:
-        return None
-
     for board in standings:
         places = _placings(board.entries)
         skipped = max(places) + 1
@@ -324,13 +350,68 @@ def format_chud(standings: list[GameStandings]) -> str | None:
         }
         for name in totals:
             totals[name] += played.get(name, skipped)
+    return totals
+
+
+def _named_winners(names: list[str]) -> str:
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+_CHAD_LINES_BOTH = (
+    "i hope your parents are proud of you!",
+    "the big leagues are calling!",
+    "awwwww",
+    "chill out! it's just a game!",
+    "touch grass!",
+    "cool.",
+    "congratulations!",
+    "wahoo!",
+    "yippee!",
+    "that's super hot!",
+    "everybody clap.",
+    "it's like everyone else didn't even try!",
+)
+_CHAD_LINES_SINGULAR = (
+    "we gotta audit this guy.",
+    "you're the alpha of the pack! 🐺",
+    "i'm from tel aviv and this is my favourite quizzer!",
+)
+_CHAD_LINES_PLURAL = ("are you guys poly?",)
+
+
+def format_chad(standings: list[GameStandings], *, variation: int = 0) -> str | None:
+    """Name the best total placement, sharing ties, with a fitting closing line."""
+
+    totals = _total_placings(standings)
+    if not totals:
+        return None
+
+    best = min(totals.values())
+    chads = sorted(name for name, total in totals.items() if total == best)
+    lines = _CHAD_LINES_BOTH + (
+        _CHAD_LINES_SINGULAR if len(chads) == 1 else _CHAD_LINES_PLURAL
+    )
+    verb = "is the CHAD" if len(chads) == 1 else "are the CHADs"
+    return (
+        f"👑 Ding ding ding! {_named_winners(chads)} {verb} of the day!\n"
+        f"{lines[variation % len(lines)]}"
+    )
+
+
+def format_chud(standings: list[GameStandings]) -> str | None:
+    """Name whoever did worst across the day's games, sharing ties."""
+
+    totals = _total_placings(standings)
+    if not totals:
+        return None
 
     worst = max(totals.values())
     chuds = sorted(name for name, total in totals.items() if total == worst)
     if len(chuds) == 1:
-        return f"Ding ding ding! {chuds[0]} is the CHUD of the day!"
-    named = f"{', '.join(chuds[:-1])} and {chuds[-1]}"
-    return f"Ding ding ding! {named} are the CHUDs of the day!"
+        return f"🚽 Ding ding ding! {chuds[0]} is the CHUD of the day!"
+    return f"Ding ding ding! {_named_winners(chuds)} are the CHUDs of the day!"
 
 
 def format_standings(standings: list[GameStandings], *, local_date: str) -> str:

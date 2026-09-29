@@ -2,7 +2,8 @@
 
 `sfbot` does two things for a Telegram group: it calls out repeated Twitter/X
 posts, and it collects everyone's daily puzzle-game results by direct message so
-the group gets one leaderboard a day instead of everyone's share text.
+the group gets a leaderboard and daily winner announcements instead of everyone's
+share text.
 
 ## Repeated links
 
@@ -76,10 +77,11 @@ flowchart TD
     Z2 --> C
     Z -->|no| C
 
-    C{"/games or /leaderboard?"}
+    C{"/games, /leaderboard,<br/>/chad, or /chud?"}
     C -->|/games| D4["send links to all supported games"]
     C -->|/leaderboard| D{"where asked?"}
-    D -->|board group or member DM| D3["read the group's standings"]
+    C -->|/chad or /chud| D
+    D -->|board group or member DM| D3["read standings or posted announcement"]
     D -->|unknown DM| D2["ask them to say<br/>something in the group"]
     D -->|other group| M
     D3 --> E["answer in the chat that asked<br/>a DM check stays private"]
@@ -103,7 +105,7 @@ flowchart TD
 
     A --> R["after each batch:<br/>send_due_reminders,<br/>post_due_leaderboard"]
     R --> S{"past 21:00 SGT<br/>and not posted yet?"}
-    S -->|yes| T["post the day's boards<br/>to the group"]
+    S -->|yes| T["post boards, CHAD, then CHUD<br/>to the group"]
     R --> U{"in the hour before,<br/>and not reminded yet?"}
     U -->|yes| V["DM each member<br/>the games they still owe"]
 ```
@@ -221,8 +223,9 @@ bot's short, non-critical five-day history.
 ## Daily games leaderboard
 
 Send results to the bot in a direct message to keep share text out of the group.
-The scheduled leaderboard adds one group message on days with results; group
-commands and repeated-link replies can also produce messages there.
+The scheduled post adds a leaderboard, a CHAD announcement, and a CHUD
+announcement on days with results. Group commands and repeated-link replies can
+also produce messages there.
 
 Send the bot a DM containing a game's share text and it replies with what it
 recorded:
@@ -245,8 +248,16 @@ worse than none.
 At or after 21:00 SGT, the bot posts the day's boards to the group once results
 exist. Each game and puzzle number gets its own board, ordered best result first;
 there is no combined points table. Results submitted after the post still appear
-in `/leaderboard`, but the group post is not updated. Use `/leaderboard` to ask
-for standings early. It replies in the chat where you ask, so a DM check stays
+in `/leaderboard`, but the group post is not updated. The CHAD is the player with
+the best total placement across boards; the CHUD has the worst. Missing a game
+costs one place beyond last, and ties share the title. The CHAD post uses one of
+several fixed closing lines, with lines suited to one or several winners. It is
+sent immediately before the CHUD post.
+
+Use `/chad` or `/chud` to repeat that day's announcement after the scheduled
+post. The messages stay the same even if more results arrive later. Before the
+result is decided, each command says so. Use `/leaderboard` to ask for standings
+early. These commands reply in the chat where you ask, so a DM check stays
 private and a group check is visible to everyone. Each game heading has its own
 emoji, and the player or players in first place get a 👑. Use `/games` in either
 chat for links to all supported games.
@@ -329,8 +340,8 @@ not match, and add cases to `tests/test_games.py` from real share text.
 ## Behavior details
 
 - Deduplication is per Telegram chat, not global across every group.
-- Game submissions and `/leaderboard` in groups are accepted only in the
-  configured leaderboard group. Members of that group can also use DMs.
+- Game submissions and `/leaderboard`, `/chad`, and `/chud` in groups are
+  accepted only in the configured leaderboard group. Members can also use DMs.
 - The earliest share remains the reply target for the five-day window.
 - Each repeated message triggers at most one `sf` reply per tweet, even if
   Telegram replays the update after a restart. A send with an uncertain outcome

@@ -8,6 +8,7 @@ from sfbot.leaderboard import (
     Entry,
     GameStandings,
     LeaderboardStore,
+    format_chad,
     format_chud,
     format_standings,
 )
@@ -148,6 +149,46 @@ class LeaderboardStoreTests(unittest.TestCase):
         self.assertFalse(self.store.is_awaiting_post(chat_id=-100, local_date=DAY))
         self.assertFalse(self.store.mark_posted(chat_id=-100, local_date=DAY))
 
+    def test_a_posted_day_keeps_its_announcements(self) -> None:
+        self.assertIsNone(self.store.posted_messages(chat_id=-100, local_date=DAY))
+        self.assertTrue(
+            self.store.mark_posted(
+                chat_id=-100,
+                local_date=DAY,
+                chad_message="Alice is the CHAD",
+                chud_message="Bob is the CHUD",
+            )
+        )
+        self.assertEqual(
+            self.store.posted_messages(chat_id=-100, local_date=DAY),
+            ("Alice is the CHAD", "Bob is the CHUD"),
+        )
+        self.assertFalse(
+            self.store.mark_posted(
+                chat_id=-100, local_date=DAY, chad_message="Changed"
+            )
+        )
+        self.assertEqual(
+            self.store.posted_messages(chat_id=-100, local_date=DAY),
+            ("Alice is the CHAD", "Bob is the CHUD"),
+        )
+
+    def test_an_old_posted_days_table_is_upgraded(self) -> None:
+        path = Path(self.temp_dir.name) / "old-posts.db"
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                """CREATE TABLE posted_days (
+                    chat_id INTEGER NOT NULL,
+                    local_date TEXT NOT NULL,
+                    PRIMARY KEY (chat_id, local_date)
+                ) WITHOUT ROWID"""
+            )
+            connection.execute("INSERT INTO posted_days VALUES (-100, ?)", (DAY,))
+        with LeaderboardStore(path) as store:
+            self.assertEqual(
+                store.posted_messages(chat_id=-100, local_date=DAY), (None, None)
+            )
+
     def test_a_day_without_results_is_never_awaiting_a_post(self) -> None:
         self.assertFalse(self.store.is_awaiting_post(chat_id=-100, local_date=DAY))
 
@@ -273,6 +314,86 @@ class FormatChudTests(unittest.TestCase):
             format_chud(boards),
             "Ding ding ding! Alice, Bob and Cara are the CHUDs of the day!",
         )
+
+
+class FormatChadTests(unittest.TestCase):
+    board = staticmethod(FormatChudTests.board)
+
+    def test_a_day_without_results_has_no_chad(self) -> None:
+        self.assertIsNone(format_chad([]))
+
+    def test_the_best_total_placement_is_the_chad(self) -> None:
+        boards = [
+            self.board("Wordle", "Alice", "Bob", "Cara"),
+            self.board("Fermi", "Bob", "Cara", "Alice"),
+            self.board("Krillion", "Alice", "Cara", "Bob"),
+            self.board("Connections", "Alice", "Bob", "Cara"),
+        ]
+        self.assertTrue(
+            format_chad(boards, variation=0).startswith(
+                "Ding ding ding! Alice is the CHAD of the day!\n"
+            )
+        )
+
+    def test_skipping_a_game_costs_more_than_last_place(self) -> None:
+        boards = [
+            self.board("Wordle", "Alice", "Bob"),
+            self.board("Fermi", "Bob"),
+            self.board("Krillion", "Bob"),
+        ]
+        self.assertTrue(
+            format_chad(boards).startswith(
+                "Ding ding ding! Bob is the CHAD of the day!\n"
+            )
+        )
+
+    def test_ties_name_every_winner(self) -> None:
+        boards = [self.board("Wordle", "Alice", "Bob")]
+        boards.append(self.board("Fermi", "Bob", "Alice"))
+        self.assertTrue(
+            format_chad(boards).startswith(
+                "Ding ding ding! Alice and Bob are the CHADs of the day!\n"
+            )
+        )
+
+    def test_all_requested_lines_fit_the_winner_count(self) -> None:
+        solo = [self.board("Wordle", "Alice")]
+        tied = [self.board("Wordle", "Alice", "Bob"), self.board("Fermi", "Bob", "Alice")]
+        singular_lines = [
+            format_chad(solo, variation=i).split("\n", 1)[1] for i in range(15)
+        ]
+        plural_lines = [
+            format_chad(tied, variation=i).split("\n", 1)[1] for i in range(13)
+        ]
+        self.assertEqual(len(set(singular_lines)), 15)
+        self.assertEqual(len(set(plural_lines)), 13)
+        self.assertEqual(
+            set(singular_lines) | set(plural_lines),
+            {
+                "we gotta audit this guy.",
+                "i hope your parents are proud of you!",
+                "you're the alpha of the pack! 🐺",
+                "the big leagues are calling!",
+                "are you guys poly?",
+                "awwwww",
+                "chill out! it's just a game!",
+                "touch grass!",
+                "i'm from tel aviv and this is my favourite quizzer!",
+                "cool.",
+                "congratulations!",
+                "wahoo!",
+                "yippee!",
+                "that's super hot!",
+                "everybody clap.",
+                "it's like everyone else didn't even try!",
+            },
+        )
+        self.assertIn("we gotta audit this guy.", singular_lines)
+        self.assertIn("you're the alpha of the pack! 🐺", singular_lines)
+        self.assertIn("i'm from tel aviv and this is my favourite quizzer!", singular_lines)
+        self.assertIn("are you guys poly?", plural_lines)
+        self.assertNotIn("are you guys poly?", singular_lines)
+        self.assertNotIn("we gotta audit this guy.", plural_lines)
 
 
 if __name__ == "__main__":

@@ -489,6 +489,69 @@ class HandleMessageTests(unittest.TestCase):
         # Same standings both times, delivered back to whoever asked.
         self.assertEqual(self.client.sent, [(DM, board), (GROUP, board)])
 
+    def test_chad_and_chud_commands_repeat_the_posted_messages(self) -> None:
+        self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
+        self.dm("Wordle 1,234 5/6", user_id=6, name="Bob")
+        self.client.sent.clear()
+
+        def ask(command: str, *, chat_id: int = DM, user_id: int = 5) -> None:
+            self.handle(
+                {
+                    "chat": {
+                        "id": chat_id,
+                        "type": "private" if chat_id == DM else "supergroup",
+                    },
+                    "message_id": 20,
+                    "date": 2_000_035_800,
+                    "from": {"id": user_id, "first_name": "Alice"},
+                    "text": command,
+                    "entities": command_entity(command),
+                }
+            )
+
+        ask("/chad")
+        ask("/chud")
+        self.assertEqual(
+            self.client.sent,
+            [
+                (DM, "The CHAD of the day hasn't been decided yet."),
+                (DM, "The CHUD of the day hasn't been decided yet."),
+            ],
+        )
+        self.client.sent.clear()
+        post_due_leaderboard(
+            self.client,  # type: ignore[arg-type]
+            self.store,
+            board_chat_id=GROUP,
+            utc_offset_minutes=SGT_OFFSET,
+            post_minute=21 * 60,
+            now=2_000_035_800,
+        )
+        chad, chud = self.client.sent[1:]
+        self.assertIn("Alice is the CHAD of the day!", chad[1])
+        self.assertEqual(chud[1], "Ding ding ding! Bob is the CHUD of the day!")
+        self.client.sent.clear()
+
+        # A result that arrives after the post must not revise either winner.
+        self.handle(
+            {
+                "chat": {"id": GROUP, "type": "supergroup"},
+                "message_id": 21,
+                "date": 2_000_035_900,
+                "from": {"id": 7, "first_name": "Cara"},
+                "text": "Wordle 1,234 1/6",
+            }
+        )
+        ask("/chad@sfbot", chat_id=GROUP)
+        ask("/chud")
+        self.assertEqual(self.client.sent, [(GROUP, chad[1]), (DM, chud[1])])
+
+        self.client.sent.clear()
+        ask("/chad", user_id=99)
+        ask("/chud", chat_id=OTHER_GROUP, user_id=99)
+        self.assertEqual(len(self.client.sent), 1)
+        self.assertIn("roster", self.client.sent[0][1])
+
     def test_games_command_links_every_supported_game(self) -> None:
         for chat_id, chat_type, command in (
             (DM, "private", "/games"),
@@ -859,8 +922,8 @@ class PostDueLeaderboardTests(unittest.TestCase):
         self.post(2_000_035_800)
         self.post(2_000_036_400)
 
-        # The board and its CHUD callout, sent once between them.
-        self.assertEqual(len(self.client.sent), 2)
+        # The board, CHAD, and CHUD are sent once in that order.
+        self.assertEqual(len(self.client.sent), 3)
         self.assertEqual(self.client.sent[0][0], GROUP)
         self.assertIn("Wordle 1234", self.client.sent[0][1])
 
@@ -883,9 +946,10 @@ class PostDueLeaderboardTests(unittest.TestCase):
         self.post(2_000_035_800)
 
         self.assertEqual(
-            self.client.sent[1],
+            self.client.sent[2],
             (GROUP, "Ding ding ding! Bob is the CHUD of the day!"),
         )
+        self.assertIn("Alice is the CHAD of the day!", self.client.sent[1][1])
 
     def test_nothing_is_posted_when_no_results_exist(self) -> None:
         self.post(2_000_035_800)
