@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -46,6 +47,48 @@ class LeaderboardStoreTests(unittest.TestCase):
         board = self.store.standings(chat_id=-100, local_date=DAY)[0]
         self.assertEqual([entry.score for entry in board.entries], ["5/6"])
 
+    def test_a_detail_survives_the_round_trip(self) -> None:
+        connections = ParsedResult(
+            game="Connections",
+            puzzle_id="500",
+            score="perfect",
+            rank_key=0.04,
+            detail="🟪🟦🟩🟨",
+        )
+        self.record("Alice", connections, user_id=5)
+
+        board = self.store.standings(chat_id=-100, local_date=DAY)[0]
+        self.assertEqual(board.entries[0].detail, "🟪🟦🟩🟨")
+
+    def test_a_database_predating_the_detail_column_is_upgraded(self) -> None:
+        path = Path(self.temp_dir.name) / "old.db"
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE game_results (
+                    chat_id INTEGER NOT NULL,
+                    local_date TEXT NOT NULL,
+                    game TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    display_name TEXT NOT NULL,
+                    puzzle_id TEXT NOT NULL,
+                    score TEXT NOT NULL,
+                    rank_key REAL NOT NULL,
+                    submitted_at INTEGER NOT NULL,
+                    PRIMARY KEY (chat_id, local_date, game, user_id)
+                ) WITHOUT ROWID
+                """
+            )
+            connection.execute(
+                "INSERT INTO game_results"
+                " VALUES (-100, ?, 'Wordle', 5, 'Alice', '1234', '3/6', 3, 0)",
+                (DAY,),
+            )
+
+        with LeaderboardStore(path) as store:
+            board = store.standings(chat_id=-100, local_date=DAY)[0]
+            self.assertEqual(board.entries[0].detail, "")
+
     def test_a_different_game_from_the_same_person_is_accepted(self) -> None:
         self.assertTrue(self.record("Alice", wordle("3/6", 3), user_id=5))
         connections = ParsedResult(
@@ -65,7 +108,9 @@ class LeaderboardStoreTests(unittest.TestCase):
 
         boards = self.store.standings(chat_id=-100, local_date=DAY)
         self.assertEqual([board.puzzle_id for board in boards], ["1234", "1235"])
-        self.assertEqual([board.entries[0].display_name for board in boards], ["Alice", "Bob"])
+        self.assertEqual(
+            [board.entries[0].display_name for board in boards], ["Alice", "Bob"]
+        )
 
     def test_failures_sort_last_and_ties_share_a_placement(self) -> None:
         self.record("Alice", wordle("X/6", 7), user_id=5, submitted_at=2_000_000_000)
@@ -141,6 +186,25 @@ class FormatStandingsTests(unittest.TestCase):
         ):
             self.assertIn(heading, text)
         self.assertEqual(text.count("1. 👑 Alice - 1"), 4)
+
+    def test_a_detail_sits_between_the_name_and_the_score(self) -> None:
+        board = GameStandings(
+            game="Connections",
+            puzzle_id="1204",
+            entries=(
+                Entry(
+                    display_name="Alice",
+                    score="perfect",
+                    rank_key=0.04,
+                    detail="🟪🟦🟩🟨",
+                ),
+                Entry(display_name="Bob", score="perfect", rank_key=0.07),
+            ),
+        )
+        text = format_standings([board], local_date=DAY)
+
+        self.assertIn("1. 👑 Alice 🟪🟦🟩🟨 - perfect", text)
+        self.assertIn("2. Bob - perfect", text)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,8 @@ _KRILLION = re.compile(
 )
 _FERMI_PUZZLE = re.compile(rf"(?im)^{_BLANK}*fermi\b[^\n\d]*(\d+){_BLANK}*$")
 _FERMI_SCORE = re.compile(rf"(?im)^{_BLANK}*([\d,.]+)×{_BLANK}*score\b")
+# Each question is a numbered line carrying its own multiplier, above the total.
+_FERMI_QUESTION = re.compile(rf"(?m)^{_BLANK}*\d+{_BLANK}+([\d,.]+)×{_BLANK}*$")
 _CONNECTIONS = re.compile(
     rf"(?im)^{_BLANK}*connections{_BLANK}*\n{_BLANK}*puzzle{_BLANK}*#(\d+){_BLANK}*$"
 )
@@ -37,6 +39,14 @@ _NON_DIGIT = re.compile(r"\D")
 
 # Connections ends after four mistakes, so that count is also the loss.
 _CONNECTIONS_MISTAKE_LIMIT = 4
+_CONNECTIONS_CATEGORIES = 4
+# The puzzle orders its categories from easiest to hardest, so pulling a purple
+# before a yellow is the harder feat and ranks ahead of it.
+_CONNECTIONS_DIFFICULTY = {"🟨": 0, "🟩": 1, "🟦": 2, "🟪": 3}
+# Both adjustments stay well inside one mistake - an unsolved category costs at
+# most 0.3 and the worst solve order 0.07 - so mistakes still decide first.
+_CONNECTIONS_UNSOLVED_WEIGHT = 0.1
+_CONNECTIONS_ORDER_WEIGHT = 0.005
 
 # Ranks are compared directly, so an unsolved puzzle needs a value that sorts
 # after every solved one.
@@ -49,6 +59,9 @@ class ParsedResult:
     puzzle_id: str
     score: str
     rank_key: float
+    # A game's own shorthand for how the result was reached, shown beside the
+    # name on the board. Empty for games whose score already says everything.
+    detail: str = ""
 
 
 def _parse_wordle(text: str) -> ParsedResult | None:
@@ -75,6 +88,14 @@ def _parse_krillion(text: str) -> ParsedResult | None:
         return None
 
     depth = int(match.group(2).replace(",", ""))
+    # Everything below the score is the dive itself, one emoji per answer. The
+    # run ends at the share link, so the ASCII of a URL is dropped along with
+    # the blank lines and separators.
+    dive = "".join(
+        character
+        for character in text[match.end() :]
+        if not character.isascii() and not character.isspace()
+    )
     return ParsedResult(
         game="Krillion",
         puzzle_id=match.group(1),
@@ -82,6 +103,7 @@ def _parse_krillion(text: str) -> ParsedResult | None:
         # A deeper dive is a better result, so the rank is negated to keep the
         # leaderboard's lowest-first ordering.
         rank_key=-depth,
+        detail=dive,
     )
 
 
@@ -96,10 +118,12 @@ def _parse_fermi(text: str) -> ParsedResult | None:
     except ValueError:
         return None
 
+    questions = _FERMI_QUESTION.findall(text)
+    breakdown = ", ".join(f"{question}×" for question in questions)
     return ParsedResult(
         game="Fermi",
         puzzle_id=puzzle.group(1),
-        score=f"{score.group(1)}×",
+        score=f"{score.group(1)}× ({breakdown})" if questions else f"{score.group(1)}×",
         # The score is how far off the guesses were, so a perfect round is 1x
         # and smaller is better.
         rank_key=factor,
@@ -115,7 +139,8 @@ def _parse_connections(text: str) -> ParsedResult | None:
     if not rows:
         return None
 
-    mistakes = sum(1 for row in rows if len(set(row)) != 1)
+    solved = [row[0] for row in rows if len(set(row)) == 1]
+    mistakes = len(rows) - len(solved)
     if mistakes > _CONNECTIONS_MISTAKE_LIMIT:
         return None
 
@@ -126,11 +151,22 @@ def _parse_connections(text: str) -> ParsedResult | None:
     else:
         score = f"{mistakes} mistake{'s' if mistakes > 1 else ''}"
 
+    # Solving a hard category late costs more than solving it early, so the
+    # penalty is each category's difficulty weighted by when it fell.
+    order_penalty = sum(
+        position * _CONNECTIONS_DIFFICULTY[colour]
+        for position, colour in enumerate(solved)
+    )
     return ParsedResult(
         game="Connections",
         puzzle_id=match.group(1),
         score=score,
-        rank_key=mistakes,
+        rank_key=(
+            mistakes
+            + _CONNECTIONS_UNSOLVED_WEIGHT * (_CONNECTIONS_CATEGORIES - len(solved))
+            + _CONNECTIONS_ORDER_WEIGHT * order_penalty
+        ),
+        detail="".join(solved),
     )
 
 
