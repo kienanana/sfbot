@@ -6,4 +6,5 @@ __pycache__/
 data/
 build/
 *.egg-info/
+uv.lock
 .DS_Store

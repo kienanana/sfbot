@@ -13,7 +13,12 @@ from typing import Any
 
 from .cache import DuplicateCache
 from .games import GAMES, parse_result
-from .leaderboard import LeaderboardStore, format_standings
+from .leaderboard import (
+    GameStandings,
+    LeaderboardStore,
+    format_chud,
+    format_standings,
+)
 from .links import extract_tweet_ids
 from .times import due_post_date, due_reminder_date, local_date
 
@@ -252,7 +257,7 @@ def _send_leaderboard(
     to_chat_id: int,
     day: str,
     nicknames: Mapping[int, str],
-) -> None:
+) -> list[GameStandings]:
     """Send the board's standings to a chat, which need not be the board itself."""
 
     standings = store.standings(
@@ -261,6 +266,7 @@ def _send_leaderboard(
     client.send_message(
         chat_id=to_chat_id, text=format_standings(standings, local_date=day)
     )
+    return standings
 
 
 def _record_submission(
@@ -482,7 +488,7 @@ def post_due_leaderboard(
 
     # Sending before marking means a failed send is retried on the next poll
     # rather than silently swallowed.
-    _send_leaderboard(
+    standings = _send_leaderboard(
         client,
         store,
         board_chat_id=board_chat_id,
@@ -490,6 +496,10 @@ def post_due_leaderboard(
         day=day,
         nicknames=nicknames,
     )
+    # Only the daily post crowns a CHUD; /leaderboard stays a plain readout.
+    chud = format_chud(standings)
+    if chud is not None:
+        client.send_message(chat_id=board_chat_id, text=chud)
     store.mark_posted(chat_id=board_chat_id, local_date=day)
     LOG.info("Posted the %s leaderboard to chat %s", day, board_chat_id)
 

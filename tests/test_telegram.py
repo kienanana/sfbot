@@ -339,7 +339,9 @@ class HandleMessageTests(unittest.TestCase):
 
         self.handle(share, client=client, action_word="Nuke")
         self.assertEqual(len(client.replies), 1)
-        self.assertEqual(client.sent, [(GROUP, "Uh oh! Looks like Bob's getting *Nuked*")])
+        self.assertEqual(
+            client.sent, [(GROUP, "Uh oh! Looks like Bob's getting *Nuked*")]
+        )
 
     def test_ambiguous_sf_timeout_does_not_send_a_second_reply(self) -> None:
         original = {
@@ -857,9 +859,33 @@ class PostDueLeaderboardTests(unittest.TestCase):
         self.post(2_000_035_800)
         self.post(2_000_036_400)
 
-        self.assertEqual(len(self.client.sent), 1)
+        # The board and its CHUD callout, sent once between them.
+        self.assertEqual(len(self.client.sent), 2)
         self.assertEqual(self.client.sent[0][0], GROUP)
         self.assertIn("Wordle 1234", self.client.sent[0][1])
+
+    def test_the_daily_post_crowns_a_chud(self) -> None:
+        for user_id, name, text in (
+            (5, "Alice", "Wordle 1,234 2/6"),
+            (6, "Bob", "Wordle 1,234 5/6"),
+        ):
+            result = parse_result(text)
+            assert result is not None
+            self.store.record(
+                chat_id=GROUP,
+                local_date="2033-05-18",
+                user_id=user_id,
+                display_name=name,
+                result=result,
+                submitted_at=2_000_000_000 + user_id,
+            )
+
+        self.post(2_000_035_800)
+
+        self.assertEqual(
+            self.client.sent[1],
+            (GROUP, "Ding ding ding! Bob is the CHUD of the day!"),
+        )
 
     def test_nothing_is_posted_when_no_results_exist(self) -> None:
         self.post(2_000_035_800)

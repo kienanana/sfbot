@@ -4,7 +4,13 @@ import unittest
 from pathlib import Path
 
 from sfbot.games import ParsedResult
-from sfbot.leaderboard import Entry, GameStandings, LeaderboardStore, format_standings
+from sfbot.leaderboard import (
+    Entry,
+    GameStandings,
+    LeaderboardStore,
+    format_chud,
+    format_standings,
+)
 
 DAY = "2033-05-18"
 
@@ -205,6 +211,68 @@ class FormatStandingsTests(unittest.TestCase):
 
         self.assertIn("1. 👑 Alice 🟪🟦🟩🟨 - perfect", text)
         self.assertIn("2. Bob - perfect", text)
+
+
+class FormatChudTests(unittest.TestCase):
+    @staticmethod
+    def board(game: str, *names: str) -> GameStandings:
+        return GameStandings(
+            game=game,
+            puzzle_id="42",
+            entries=tuple(
+                Entry(display_name=name, score=str(rank), rank_key=rank)
+                for rank, name in enumerate(names, start=1)
+            ),
+        )
+
+    def test_a_day_without_results_has_no_chud(self) -> None:
+        self.assertIsNone(format_chud([]))
+
+    def test_the_worst_total_placement_is_the_chud(self) -> None:
+        boards = [
+            self.board("Wordle", "Alice", "Bob", "Cara"),
+            self.board("Fermi", "Bob", "Cara", "Alice"),
+            self.board("Krillion", "Alice", "Cara", "Bob"),
+            self.board("Connections", "Alice", "Bob", "Cara"),
+        ]
+        # Alice 6, Bob 8, Cara 10 - one bad game is not enough to sink Alice.
+        self.assertEqual(
+            format_chud(boards), "Ding ding ding! Cara is the CHUD of the day!"
+        )
+
+    def test_sitting_a_game_out_is_worse_than_losing_it(self) -> None:
+        boards = [
+            self.board("Wordle", "Alice", "Bob", "Cara"),
+            self.board("Fermi", "Alice", "Bob"),
+        ]
+        # Cara skipped Fermi, which costs more than Bob's last place on it.
+        self.assertEqual(
+            format_chud(boards), "Ding ding ding! Cara is the CHUD of the day!"
+        )
+
+    def test_a_shared_placement_spares_nobody(self) -> None:
+        tied = GameStandings(
+            game="Wordle",
+            puzzle_id="42",
+            entries=(
+                Entry(display_name="Alice", score="3/6", rank_key=3),
+                Entry(display_name="Bob", score="5/6", rank_key=5),
+                Entry(display_name="Cara", score="5/6", rank_key=5),
+            ),
+        )
+        self.assertEqual(
+            format_chud([tied]),
+            "Ding ding ding! Bob and Cara are the CHUDs of the day!",
+        )
+
+    def test_three_chuds_are_listed_with_commas(self) -> None:
+        boards = [self.board("Wordle", "Alice"), self.board("Fermi", "Bob")]
+        boards.append(self.board("Krillion", "Cara"))
+        # Everyone played one game and skipped two, so nobody is spared.
+        self.assertEqual(
+            format_chud(boards),
+            "Ding ding ding! Alice, Bob and Cara are the CHUDs of the day!",
+        )
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import groupby
 from pathlib import Path
@@ -287,6 +287,52 @@ class LeaderboardStore:
         self.close()
 
 
+def _placings(entries: Sequence[Entry]) -> list[int]:
+    """Return each entry's placement on its board, equal results sharing one."""
+
+    places: list[int] = []
+    place = 0
+    previous_rank: float | None = None
+    for index, entry in enumerate(entries, start=1):
+        if entry.rank_key != previous_rank:
+            place = index
+            previous_rank = entry.rank_key
+        places.append(place)
+    return places
+
+
+def format_chud(standings: list[GameStandings]) -> str | None:
+    """Name whoever did worst across the day's games, or None if nobody played.
+
+    Everyone who turned up on any board is scored on all of them: a game
+    somebody sat out counts as one worse than its last place, so skipping is
+    the chuddiest move available. Nothing separates a tie, so it is shared.
+    """
+
+    totals: dict[str, int] = {}
+    for board in standings:
+        for entry in board.entries:
+            totals.setdefault(entry.display_name, 0)
+    if not totals:
+        return None
+
+    for board in standings:
+        places = _placings(board.entries)
+        skipped = max(places) + 1
+        played = {
+            entry.display_name: place for entry, place in zip(board.entries, places)
+        }
+        for name in totals:
+            totals[name] += played.get(name, skipped)
+
+    worst = max(totals.values())
+    chuds = sorted(name for name, total in totals.items() if total == worst)
+    if len(chuds) == 1:
+        return f"Ding ding ding! {chuds[0]} is the CHUD of the day!"
+    named = f"{', '.join(chuds[:-1])} and {chuds[-1]}"
+    return f"Ding ding ding! {named} are the CHUDs of the day!"
+
+
 def format_standings(standings: list[GameStandings], *, local_date: str) -> str:
     """Render the per-game boards as plain text.
 
@@ -303,13 +349,7 @@ def format_standings(standings: list[GameStandings], *, local_date: str) -> str:
         game = GAME_BY_NAME.get(board.game)
         heading = f"{game.emoji} {board.game}" if game is not None else board.game
         lines.append(f"{heading} {board.puzzle_id}")
-        place = 0
-        previous_rank: float | None = None
-        for index, entry in enumerate(board.entries, start=1):
-            # Equal results share a placement.
-            if entry.rank_key != previous_rank:
-                place = index
-                previous_rank = entry.rank_key
+        for entry, place in zip(board.entries, _placings(board.entries)):
             crown = " 👑" if place == 1 else ""
             detail = f" {entry.detail}" if entry.detail else ""
             lines.append(
