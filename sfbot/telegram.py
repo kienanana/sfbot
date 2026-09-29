@@ -7,6 +7,7 @@ import logging
 import time
 import urllib.error
 import urllib.request
+import zlib
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Any
@@ -16,6 +17,7 @@ from .games import GAMES, parse_result
 from .leaderboard import (
     GameStandings,
     LeaderboardStore,
+    format_chad,
     format_chud,
     format_standings,
 )
@@ -26,6 +28,8 @@ LOG = logging.getLogger(__name__)
 
 _LEADERBOARD_COMMAND = "/leaderboard"
 _GAMES_COMMAND = "/games"
+_CHAD_COMMAND = "/chad"
+_CHUD_COMMAND = "/chud"
 _ACKNOWLEDGEMENT = "\N{THUMBS UP SIGN}"
 _UNKNOWN_SENDER = (
     "I don't have you on the group roster yet. Say anything in the group chat,"
@@ -370,11 +374,12 @@ def handle_message(
         client.send_message(chat_id=chat_id, text=text, entities=entities)
         return
 
-    if command == _LEADERBOARD_COMMAND:
+    if command in (_LEADERBOARD_COMMAND, _CHAD_COMMAND, _CHUD_COMMAND):
         if board_chat_id is None:
             LOG.warning(
-                "Ignoring /leaderboard: set SFBOT_LEADERBOARD_CHAT_ID to the group's"
+                "Ignoring %s: set SFBOT_LEADERBOARD_CHAT_ID to the group's"
                 " chat ID. This chat's ID is %s",
+                command,
                 chat_id,
             )
             return
@@ -386,16 +391,41 @@ def handle_message(
         ):
             client.send_message(chat_id=chat_id, text=_UNKNOWN_SENDER)
             return
-        # The standings always come from the group's board, but the answer goes
-        # back to whoever asked, so checking from a DM stays private.
-        _send_leaderboard(
-            client,
-            store,
-            board_chat_id=board_chat_id,
-            to_chat_id=chat_id,
-            day=local_date(seen_at, utc_offset_minutes=utc_offset_minutes),
-            nicknames=nicknames,
-        )
+        day = local_date(seen_at, utc_offset_minutes=utc_offset_minutes)
+        if command == _LEADERBOARD_COMMAND:
+            # The standings always come from the group's board, but the answer
+            # goes back to whoever asked, so a DM check stays private.
+            _send_leaderboard(
+                client,
+                store,
+                board_chat_id=board_chat_id,
+                to_chat_id=chat_id,
+                day=day,
+                nicknames=nicknames,
+            )
+            return
+
+        posted = store.posted_messages(chat_id=board_chat_id, local_date=day)
+        title = "CHAD" if command == _CHAD_COMMAND else "CHUD"
+        if posted is None:
+            client.send_message(
+                chat_id=chat_id, text=f"The {title} of the day hasn't been decided yet."
+            )
+            return
+        message = posted[0] if command == _CHAD_COMMAND else posted[1]
+        if message is None:
+            # Days posted before this feature have no saved message.
+            standings = store.standings(
+                chat_id=board_chat_id, local_date=day, nicknames=nicknames
+            )
+            if command == _CHAD_COMMAND:
+                message = format_chad(
+                    standings, variation=_chad_variation(board_chat_id, day)
+                )
+            else:
+                message = format_chud(standings)
+        if message is not None:
+            client.send_message(chat_id=chat_id, text=message)
         return
 
     tweet_ids = extract_tweet_ids(message)
@@ -496,12 +526,25 @@ def post_due_leaderboard(
         day=day,
         nicknames=nicknames,
     )
-    # Only the daily post crowns a CHUD; /leaderboard stays a plain readout.
+    chad = format_chad(standings, variation=_chad_variation(board_chat_id, day))
     chud = format_chud(standings)
+    if chad is not None:
+        client.send_message(chat_id=board_chat_id, text=chad)
     if chud is not None:
         client.send_message(chat_id=board_chat_id, text=chud)
-    store.mark_posted(chat_id=board_chat_id, local_date=day)
+    store.mark_posted(
+        chat_id=board_chat_id,
+        local_date=day,
+        chad_message=chad,
+        chud_message=chud,
+    )
     LOG.info("Posted the %s leaderboard to chat %s", day, board_chat_id)
+
+
+def _chad_variation(chat_id: int, day: str) -> int:
+    """Choose one line per group and day, consistently across send retries."""
+
+    return zlib.crc32(f"{chat_id}:{day}".encode("utf-8"))
 
 
 def send_due_reminders(
