@@ -39,7 +39,8 @@ indexed SQLite database and scoped per Telegram chat.
 Some people go by something other than their Telegram name. `SFBOT_NICKNAMES`
 holds comma-separated `user_id:nickname` pairs and overrides the Telegram name
 everywhere the bot names someone — the `sf` reply's mention, the repeat-poster
-callout, and the leaderboard — so Bob who goes by Juan gets `/NukeJuan`:
+callout, the leaderboard, and the CHAD and CHUD announcements — so Bob who goes
+by Juan gets `/NukeJuan`:
 
 ```dotenv
 SFBOT_NICKNAMES=123456789:Juan,987654321:Nikki
@@ -60,7 +61,11 @@ SFBOT_LOG_LEVEL=DEBUG make run
 
 Anyone without an entry keeps their Telegram name. The bot is restarted for a
 change to take effect. The current nickname also appears for scores submitted
-before the change.
+before the change, and for a CHAD or CHUD announcement repeated after it: the
+winner is stored by user ID, so `/chad` and `/chud` name them the way the bot
+would name them today. A day posted before that was recorded has only the
+message it sent, so the names in it are swapped for nicknames where they still
+belong to one player of that day.
 
 ## Architecture
 
@@ -255,12 +260,17 @@ several fixed closing lines, with lines suited to one or several winners. It is
 sent immediately before the CHUD post.
 
 Use `/chad` or `/chud` to repeat that day's announcement after the scheduled
-post. The messages stay the same even if more results arrive later. Before the
-result is decided, each command says so. Use `/leaderboard` to ask for standings
-early. These commands reply in the chat where you ask, so a DM check stays
-private and a group check is visible to everyone. Each game heading has its own
-emoji, and the player or players in first place get a 👑. Use `/games` in either
-chat for links to all supported games.
+post. The winners stay the same even if more results arrive later, but they are
+named as they are now: the announcement is re-rendered from the day's saved
+winners, so a nickname added or changed after the post still shows. Only a day
+posted before the winners were saved falls back to the message it sent, with
+its names swapped for nicknames where they still match one player of that day.
+
+Before the result is decided, each command says so. Use `/leaderboard` to ask
+for standings early. These commands reply in the chat where you ask, so a DM
+check stays private and a group check is visible to everyone. Each game heading
+has its own emoji, and the player or players in first place get a 👑. Use
+`/games` in either chat for links to all supported games.
 
 Pasting a result into the group still works and still counts, acknowledged with
 a 👍 rather than a reply. It just defeats the point.
