@@ -610,49 +610,99 @@ def run_polling(
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
 ) -> None:
     offset: int | None = None
-    backoff = 1
-    LOG.info("sfbot is listening for messages")
+    poll_backoff = 1
+    request_errors = (
+        TelegramAPIError, urllib.error.URLError, TimeoutError, ConnectionError,
+        json.JSONDecodeError,
+    )
 
+    def run_scheduled_tasks() -> None:
+        if board_chat_id is None or post_minute is None:
+            return
+        # A failed reminder round must not prevent the daily post, and neither
+        # task may prevent incoming updates from being processed.
+        for name, task in (
+            ("reminders", send_due_reminders),
+            ("leaderboard", post_due_leaderboard),
+        ):
+            options: dict[str, Any] = {
+                "board_chat_id": board_chat_id,
+                "utc_offset_minutes": utc_offset_minutes,
+                "post_minute": post_minute,
+            }
+            if name == "leaderboard":
+                options["nicknames"] = nicknames
+            try:
+                task(client, store, **options)
+            except request_errors as error:
+                LOG.warning("Scheduled task %s failed (%s)", name, error)
+
+    LOG.info("sfbot is listening for messages")
     while True:
         try:
             updates = client.get_updates(offset=offset, poll_timeout=poll_timeout)
-            backoff = 1
-            for update in updates:
-                update_id = update.get("update_id")
-                message = update.get("message")
-                if isinstance(message, Mapping):
-                    handle_message(
-                        message,
-                        cache=cache,
-                        store=store,
-                        client=client,
-                        utc_offset_minutes=utc_offset_minutes,
-                        board_chat_id=board_chat_id,
-                        action_word=action_word,
-                        nicknames=nicknames,
-                    )
-                # Only acknowledge an update after all of its side effects have
-                # succeeded. A transient sendMessage failure is then retried.
-                if isinstance(update_id, int):
-                    offset = update_id + 1
+        except request_errors as error:
+            LOG.warning(
+                "Telegram polling failed (%s); retrying in %ss", error, poll_backoff
+            )
+            run_scheduled_tasks()
+            time.sleep(poll_backoff)
+            poll_backoff = min(poll_backoff * 2, 30)
+            continue
+        poll_backoff = 1
 
-            if board_chat_id is not None and post_minute is not None:
-                send_due_reminders(
-                    client,
-                    store,
-                    board_chat_id=board_chat_id,
-                    utc_offset_minutes=utc_offset_minutes,
-                    post_minute=post_minute,
-                )
-                post_due_leaderboard(
-                    client,
-                    store,
-                    board_chat_id=board_chat_id,
-                    utc_offset_minutes=utc_offset_minutes,
-                    post_minute=post_minute,
-                    nicknames=nicknames,
-                )
-        except (TelegramAPIError, urllib.error.URLError, TimeoutError) as error:
-            LOG.warning("Telegram request failed (%s); retrying in %ss", error, backoff)
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 30)
+        for update in updates:
+            if not isinstance(update, Mapping):
+                LOG.warning("Ignoring malformed Telegram update")
+                continue
+            update_id = update.get("update_id")
+            if not isinstance(update_id, int):
+                LOG.warning("Ignoring Telegram update without an integer ID")
+                continue
+            message = update.get("message")
+            if isinstance(message, Mapping):
+                # Bound retries so an unreachable sender or a persistently
+                # failing request cannot hold up every later update. Existing
+                # result/reply claims still protect against replayed effects.
+                for attempt in range(3):
+                    try:
+                        handle_message(
+                            message,
+                            cache=cache,
+                            store=store,
+                            client=client,
+                            utc_offset_minutes=utc_offset_minutes,
+                            board_chat_id=board_chat_id,
+                            action_word=action_word,
+                            nicknames=nicknames,
+                        )
+                    except request_errors as error:
+                        transient = not isinstance(error, TelegramAPIError) or (
+                            error.status == 429 or error.status >= 500
+                        )
+                        if not transient or attempt == 2:
+                            LOG.warning(
+                                "Skipping update %s after reply failure (%s)",
+                                update_id, error,
+                            )
+                            break
+                        delay = 2 ** attempt
+                        LOG.warning(
+                            "Update %s request failed (%s); retrying in %ss",
+                            update_id, error, delay,
+                        )
+                        run_scheduled_tasks()
+                        time.sleep(delay)
+                    except (ValueError, TypeError, KeyError, AttributeError) as error:
+                        LOG.warning(
+                            "Skipping malformed update %s (%s)",
+                            update_id, type(error).__name__,
+                        )
+                        break
+                    else:
+                        break
+            # Successful, malformed, and exhausted updates are all acknowledged;
+            # otherwise one permanent failure would poison the polling queue.
+            offset = update_id + 1
+
+        run_scheduled_tasks()

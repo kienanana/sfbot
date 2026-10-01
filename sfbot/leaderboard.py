@@ -14,6 +14,7 @@ from .games import GAME_BY_NAME, ParsedResult
 
 @dataclass(frozen=True, slots=True)
 class Entry:
+    user_id: int
     display_name: str
     score: str
     rank_key: float
@@ -205,7 +206,8 @@ class LeaderboardStore:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT game, puzzle_id, user_id, display_name, score, rank_key, detail
+                SELECT game, puzzle_id, user_id, display_name, score, rank_key, detail,
+                       submitted_at
                 FROM game_results
                 WHERE chat_id = ? AND local_date = ?
                 ORDER BY game, puzzle_id, rank_key, submitted_at
@@ -214,6 +216,13 @@ class LeaderboardStore:
             ).fetchall()
 
         current_nicknames = nicknames if nicknames is not None else {}
+        # A player can change their Telegram name between submissions. Render
+        # all their entries with the latest submitted name, but keep identity
+        # separate from that label when calculating daily winners.
+        names = {
+            int(row[2]): str(row[3])
+            for row in sorted(rows, key=lambda row: row[7])
+        }
         boards: list[GameStandings] = []
         for (game, puzzle_id), game_rows in groupby(
             rows, key=lambda row: (row[0], row[1])
@@ -225,8 +234,9 @@ class LeaderboardStore:
                     puzzle_id=str(puzzle_id),
                     entries=tuple(
                         Entry(
+                            user_id=int(row[2]),
                             display_name=current_nicknames.get(
-                                int(row[2]), str(row[3])
+                                int(row[2]), names[int(row[2])]
                             ),
                             score=str(row[4]),
                             rank_key=float(row[5]),
@@ -336,21 +346,30 @@ def _placings(entries: Sequence[Entry]) -> list[int]:
     return places
 
 
-def _total_placings(standings: list[GameStandings]) -> dict[str, int]:
+def _total_placings(standings: list[GameStandings]) -> dict[int, int]:
     """Sum placements across boards; skipping costs one worse than last place."""
-    totals: dict[str, int] = {}
+    totals: dict[int, int] = {}
     for board in standings:
         for entry in board.entries:
-            totals.setdefault(entry.display_name, 0)
+            totals.setdefault(entry.user_id, 0)
     for board in standings:
         places = _placings(board.entries)
         skipped = max(places) + 1
         played = {
-            entry.display_name: place for entry, place in zip(board.entries, places)
+            entry.user_id: place for entry, place in zip(board.entries, places)
         }
-        for name in totals:
-            totals[name] += played.get(name, skipped)
+        for user_id in totals:
+            totals[user_id] += played.get(user_id, skipped)
     return totals
+
+
+def _winner_names(standings: list[GameStandings], user_ids: list[int]) -> list[str]:
+    names = {
+        entry.user_id: entry.display_name
+        for board in standings
+        for entry in board.entries
+    }
+    return sorted(names[user_id] for user_id in user_ids)
 
 
 def _named_winners(names: list[str]) -> str:
@@ -390,7 +409,9 @@ def format_chad(standings: list[GameStandings], *, variation: int = 0) -> str | 
         return None
 
     best = min(totals.values())
-    chads = sorted(name for name, total in totals.items() if total == best)
+    chads = _winner_names(
+        standings, [user_id for user_id, total in totals.items() if total == best]
+    )
     lines = _CHAD_LINES_BOTH + (
         _CHAD_LINES_SINGULAR if len(chads) == 1 else _CHAD_LINES_PLURAL
     )
@@ -409,10 +430,12 @@ def format_chud(standings: list[GameStandings]) -> str | None:
         return None
 
     worst = max(totals.values())
-    chuds = sorted(name for name, total in totals.items() if total == worst)
+    chuds = _winner_names(
+        standings, [user_id for user_id, total in totals.items() if total == worst]
+    )
     if len(chuds) == 1:
         return f"🚽 Ding ding ding! {chuds[0]} is the CHUD of the day!"
-    return f"Ding ding ding! {_named_winners(chuds)} are the CHUDs of the day!"
+    return f"🚽 Ding ding ding! {_named_winners(chuds)} are the CHUDs of the day!"
 
 
 def format_standings(standings: list[GameStandings], *, local_date: str) -> str:

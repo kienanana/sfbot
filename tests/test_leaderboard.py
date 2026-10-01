@@ -54,6 +54,43 @@ class LeaderboardStoreTests(unittest.TestCase):
         board = self.store.standings(chat_id=-100, local_date=DAY)[0]
         self.assertEqual([entry.score for entry in board.entries], ["5/6"])
 
+    def test_users_with_the_same_name_keep_separate_daily_totals(self) -> None:
+        # Alex #5 wins one game and skips two; Alex #6 plays all three.
+        self.record("Alex", wordle("1/6", 1), user_id=5)
+        self.record("Alex", wordle("6/6", 6), user_id=6)
+        for game in ("Fermi", "Krillion"):
+            self.record("Alex", ParsedResult(game, "42", "1", 1), user_id=6)
+        boards = self.store.standings(chat_id=-100, local_date=DAY)
+        from sfbot.leaderboard import _total_placings
+        self.assertEqual(_total_placings(boards), {5: 5, 6: 4})
+        self.assertIn("Alex is the CHAD", format_chad(boards))
+        self.assertIn("Alex is the CHUD", format_chud(boards))
+
+    def test_a_name_change_does_not_split_a_player(self) -> None:
+        self.record("Alice", wordle("1/6", 1), user_id=5, submitted_at=1)
+        self.record("Bob", wordle("6/6", 6), user_id=6, submitted_at=2)
+        self.record(
+            "Alicia", ParsedResult("Fermi", "42", "1", 1),
+            user_id=5, submitted_at=3,
+        )
+        boards = self.store.standings(chat_id=-100, local_date=DAY)
+        self.assertEqual(
+            [entry.display_name for board in boards for entry in board.entries
+             if entry.user_id == 5], ["Alicia", "Alicia"],
+        )
+        self.assertIn("Alicia is the CHAD", format_chad(boards))
+        self.assertIn("Bob is the CHUD", format_chud(boards))
+        self.assertNotIn("Alice", format_chud(boards))
+
+    def test_duplicate_nicknames_do_not_merge_tied_winners(self) -> None:
+        self.record("Alice", wordle("3/6", 3), user_id=5)
+        self.record("Bob", wordle("3/6", 3), user_id=6)
+        boards = self.store.standings(
+            chat_id=-100, local_date=DAY, nicknames={5: "Alex", 6: "Alex"},
+        )
+        self.assertIn("Alex and Alex are the CHADs", format_chad(boards))
+        self.assertIn("Alex and Alex are the CHUDs", format_chud(boards))
+
     def test_a_detail_survives_the_round_trip(self) -> None:
         connections = ParsedResult(
             game="Connections",
@@ -219,7 +256,7 @@ class FormatStandingsTests(unittest.TestCase):
             GameStandings(
                 game=name,
                 puzzle_id="42",
-                entries=(Entry(display_name="Alice", score="1", rank_key=1),),
+                entries=(Entry(user_id=5, display_name="Alice", score="1", rank_key=1),),
             )
             for name in ("Connections", "Fermi", "Krillion", "Wordle")
         ]
@@ -240,12 +277,13 @@ class FormatStandingsTests(unittest.TestCase):
             puzzle_id="1204",
             entries=(
                 Entry(
+                    user_id=5,
                     display_name="Alice",
                     score="perfect",
                     rank_key=0.04,
                     detail="🟪🟦🟩🟨",
                 ),
-                Entry(display_name="Bob", score="perfect", rank_key=0.07),
+                Entry(user_id=6, display_name="Bob", score="perfect", rank_key=0.07),
             ),
         )
         text = format_standings([board], local_date=DAY)
@@ -261,7 +299,8 @@ class FormatChudTests(unittest.TestCase):
             game=game,
             puzzle_id="42",
             entries=tuple(
-                Entry(display_name=name, score=str(rank), rank_key=rank)
+                Entry(user_id={"Alice": 5, "Bob": 6, "Cara": 7}[name],
+                      display_name=name, score=str(rank), rank_key=rank)
                 for rank, name in enumerate(names, start=1)
             ),
         )
@@ -296,14 +335,14 @@ class FormatChudTests(unittest.TestCase):
             game="Wordle",
             puzzle_id="42",
             entries=(
-                Entry(display_name="Alice", score="3/6", rank_key=3),
-                Entry(display_name="Bob", score="5/6", rank_key=5),
-                Entry(display_name="Cara", score="5/6", rank_key=5),
+                Entry(user_id=5, display_name="Alice", score="3/6", rank_key=3),
+                Entry(user_id=6, display_name="Bob", score="5/6", rank_key=5),
+                Entry(user_id=7, display_name="Cara", score="5/6", rank_key=5),
             ),
         )
         self.assertEqual(
             format_chud([tied]),
-            "Ding ding ding! Bob and Cara are the CHUDs of the day!",
+            "🚽 Ding ding ding! Bob and Cara are the CHUDs of the day!",
         )
 
     def test_three_chuds_are_listed_with_commas(self) -> None:
@@ -312,7 +351,7 @@ class FormatChudTests(unittest.TestCase):
         # Everyone played one game and skipped two, so nobody is spared.
         self.assertEqual(
             format_chud(boards),
-            "Ding ding ding! Alice, Bob and Cara are the CHUDs of the day!",
+            "🚽 Ding ding ding! Alice, Bob and Cara are the CHUDs of the day!",
         )
 
 

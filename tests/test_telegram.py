@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from sfbot.cache import DuplicateCache
 from sfbot.games import parse_result
@@ -12,6 +12,7 @@ from sfbot.telegram import (
     handle_message,
     post_due_leaderboard,
     send_due_reminders,
+    run_polling,
 )
 
 SGT_OFFSET = 480
@@ -717,6 +718,121 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(
             self.store.standings(chat_id=GROUP, local_date="2033-05-18"), []
         )
+
+
+class RunPollingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        path = Path(self.temp_dir.name) / "sfbot.db"
+        self.cache = DuplicateCache(path)
+        self.store = LeaderboardStore(path)
+        self.client = FakeTelegramClient()
+        self.poll = Mock()
+        self.client.get_updates = self.poll
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.cache.close()
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def update(update_id: int) -> dict:
+        return {
+            "update_id": update_id,
+            "message": {
+                "chat": {"id": DM, "type": "private"},
+                "message_id": update_id,
+                "date": 2_000_000_000,
+                "text": "/games",
+                "entities": command_entity("/games"),
+            },
+        }
+
+    def run_bot(self, batches, *, reminder_error=None, post_error=None):
+        self.poll.side_effect = [*batches, KeyboardInterrupt()]
+        with (
+            patch("sfbot.telegram.time.sleep") as sleep,
+            patch("sfbot.telegram.send_due_reminders", side_effect=reminder_error) as reminders,
+            patch("sfbot.telegram.post_due_leaderboard", side_effect=post_error) as posts,
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            run_polling(
+                self.client, self.cache, self.store,
+                board_chat_id=GROUP, post_minute=21 * 60,
+            )
+        return sleep, reminders, posts
+
+    def test_permanent_reply_error_does_not_block_later_updates(self) -> None:
+        with patch.object(
+            self.client, "send_message",
+            side_effect=[TelegramAPIError(403, "blocked"), None],
+        ) as send:
+            sleep, reminders, posts = self.run_bot([[self.update(10), self.update(11)]])
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(self.poll.call_args_list[1].kwargs["offset"], 12)
+        sleep.assert_not_called()
+        reminders.assert_called_once()
+        posts.assert_called_once()
+
+    def test_transient_reply_failure_is_retried(self) -> None:
+        for error in (TimeoutError(), TelegramAPIError(500, "unavailable"),
+                      TelegramAPIError(429, "rate limited")):
+            with self.subTest(error=type(error).__name__), patch.object(
+                self.client, "send_message", side_effect=[error, None],
+            ) as send:
+                sleep, reminders, posts = self.run_bot([[self.update(10)]])
+                self.assertEqual(send.call_count, 2)
+                self.assertEqual(self.poll.call_args.kwargs["offset"], 11)
+                sleep.assert_called_once_with(1)
+                self.assertGreaterEqual(posts.call_count, 1)
+            self.poll.reset_mock()
+
+    def test_persistent_transient_failure_has_bounded_retries(self) -> None:
+        with patch.object(
+            self.client, "send_message",
+            side_effect=[TimeoutError(), TimeoutError(), TimeoutError(), None],
+        ) as send:
+            sleep, reminders, posts = self.run_bot([[self.update(10), self.update(11)]])
+        self.assertEqual(send.call_count, 4)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+        self.assertEqual(self.poll.call_args.kwargs["offset"], 12)
+        self.assertGreaterEqual(posts.call_count, 1)
+
+    def test_malformed_message_does_not_stop_the_batch(self) -> None:
+        broken = self.update(10)
+        broken["message"]["date"] = "invalid"
+        sleep, reminders, posts = self.run_bot([
+            [None, {"update_id": "invalid"}, broken, self.update(11)],
+        ])
+        self.assertEqual(len(self.client.sent), 1)
+        self.assertEqual(self.poll.call_args.kwargs["offset"], 12)
+        sleep.assert_not_called()
+        posts.assert_called_once()
+
+    def test_poll_failures_back_off_without_disabling_scheduled_tasks(self) -> None:
+        sleep, reminders, posts = self.run_bot([
+            TimeoutError(), TimeoutError(), [], TimeoutError(), [],
+        ])
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2, 1])
+        self.assertEqual(reminders.call_count, 5)
+        self.assertEqual(posts.call_count, 5)
+
+    def test_reminder_failure_does_not_block_posts_or_updates(self) -> None:
+        sleep, reminders, posts = self.run_bot(
+            [[self.update(10)], [self.update(11)]], reminder_error=TimeoutError(),
+        )
+        self.assertEqual(len(self.client.sent), 2)
+        self.assertEqual(self.poll.call_args.kwargs["offset"], 12)
+        self.assertEqual(posts.call_count, 2)
+
+    def test_post_failure_does_not_block_next_poll(self) -> None:
+        sleep, reminders, posts = self.run_bot(
+            [[self.update(10)], [self.update(11)]],
+            post_error=TelegramAPIError(403, "forbidden"),
+        )
+        self.assertEqual(len(self.client.sent), 2)
+        self.assertEqual(self.poll.call_args.kwargs["offset"], 12)
+        self.assertEqual(reminders.call_count, 2)
 
 
 class TelegramClientTests(unittest.TestCase):

@@ -29,38 +29,28 @@ name ever needs escaping.
 The name is the person's Telegram first name unless `SFBOT_NICKNAMES` gives one
 for them; see [Nicknames](#nicknames).
 
-The canonical key is Twitter's numeric status ID. As a result, `twitter.com`
-and `x.com` links, different usernames, mobile subdomains, tracking parameters,
-and `/photo/1` suffixes all resolve to the same post. Origins are stored in an
-indexed SQLite database and scoped per Telegram chat.
+Links are matched by numeric status ID within each chat. Twitter/X domains,
+usernames, mobile subdomains, tracking parameters, and `/photo/1` suffixes do
+not affect matching. The first share remains the reply target for five days.
+Text, media captions, and hidden links are supported; `t.co` links are not resolved.
 
 ## Nicknames
 
-Some people go by something other than their Telegram name. `SFBOT_NICKNAMES`
-holds comma-separated `user_id:nickname` pairs and overrides the Telegram name
-everywhere the bot names someone — the `sf` reply's mention, the repeat-poster
-callout, and the leaderboard — so Bob who goes by Juan gets `/NukeJuan`:
+`SFBOT_NICKNAMES` overrides names in callouts, mentions without a username, and
+standings. Real @usernames still take precedence for mentions.
 
 ```dotenv
 SFBOT_NICKNAMES=123456789:Juan,987654321:Nikki
 ```
 
-Someone with a Telegram @username is still mentioned by it, since a real
-handle pings them and a nickname cannot.
-
-The key is the numeric Telegram user ID rather than the name, because first
-names get changed and two people can share one. The IDs are not shown in the
-app either, so read them out of the logs the same way as the chat ID, with
-debug logging on:
+Find numeric user IDs in the debug logs:
 
 ```sh
 SFBOT_LOG_LEVEL=DEBUG make run
 # ... Message from user 123456789 (Bob)
 ```
 
-Anyone without an entry keeps their Telegram name. The bot is restarted for a
-change to take effect. The current nickname also appears for scores submitted
-before the change.
+Restart after changing nicknames. They also apply to existing results.
 
 ## Architecture
 
@@ -154,24 +144,9 @@ SSL_CERT_FILE="$(python3.11 -m certifi)" make run
 
 Stop the bot with `Ctrl+C`. The local cache is stored at `data/sfbot.db`.
 
-Run the tests with:
-
-```sh
-make test
-```
-
-Run the complete local check, including bytecode compilation, with:
-
-```sh
-make check
-```
-
-The Makefile uses `python3.11` by default. Override it when using another
-supported interpreter:
-
-```sh
-make check PYTHON=python3.12
-```
+Use `make test` for unit tests or `make check` for tests and bytecode compilation.
+The Makefile defaults to `python3.11`; override it with
+`make check PYTHON=python3.12` when needed.
 
 ## Run on the homelab
 
@@ -222,55 +197,43 @@ bot's short, non-critical five-day history.
 
 ## Daily games leaderboard
 
-Send results to the bot in a direct message to keep share text out of the group.
-The scheduled post adds a leaderboard, a CHAD announcement, and a CHUD
-announcement on days with results. Group commands and repeated-link replies can
-also produce messages there.
+Wordle, Connections, Krillion, and Fermi are supported. DM the bot your game's
+share text and it confirms the recorded result:
 
-Send the bot a DM containing a game's share text and it replies with what it
-recorded:
-
-```
-you:  Wordle 1,412 3/6
-      ⬛🟨⬛⬛⬛
-      🟩🟩🟩🟩🟩
-
-bot:  Recorded Wordle 1412 - 3/6
+```text
+you: Wordle 1,412 3/6
+bot: Recorded Wordle 1412 - 3/6
 ```
 
-An hour before the post, the bot DMs each member of the roster the games they
-have not submitted yet, skipping anyone who has played all of them. A member who
-never pressed Start cannot be DM'd; that failure is logged and the rest still go
-out. Unlike the post itself, a reminder missed while the bot was down is dropped
-rather than sent late, since a warning about a board that has already gone up is
-worse than none.
+Only people the bot has seen speaking in the configured group can submit or
+read standings by DM. Say anything in the group to join the roster, then press
+Start in the bot's DM so it can send you reminders. DMs never add members;
+people who leave the group remain on the roster.
 
-At or after 21:00 SGT, the bot posts the day's boards to the group once results
-exist. Each game and puzzle number gets its own board, ordered best result first;
-there is no combined points table. Results submitted after the post still appear
-in `/leaderboard`, but the group post is not updated. The CHAD is the player with
-the best total placement across boards; the CHUD has the worst. Missing a game
-costs one place beyond last, and ties share the title. The CHAD post uses one of
-several fixed closing lines, with lines suited to one or several winners. It is
-sent immediately before the CHUD post.
+The first result per person, game, and local day is final. Group submissions
+also count and get a 👍 reaction. Results sent after local midnight count toward
+the new day; the default day boundary is UTC+8.
 
-Use `/chad` or `/chud` to repeat that day's announcement after the scheduled
-post. The messages stay the same even if more results arrive later. Before the
-result is decided, each command says so. Use `/leaderboard` to ask for standings
-early. These commands reply in the chat where you ask, so a DM check stays
-private and a group check is visible to everyone. Each game heading has its own
-emoji, and the player or players in first place get a 👑. Use `/games` in either
-chat for links to all supported games.
+At 20:00 SGT, members receive a DM listing their outstanding games. Missed
+reminders are dropped after the posting window opens. At or after 21:00 SGT,
+days with results get a board, followed by CHAD and CHUD announcements.
 
-Pasting a result into the group still works and still counts, acknowledged with
-a 👍 rather than a reply. It just defeats the point.
+Each game and puzzle number has its own board, ordered best first with ties
+sharing a placement and first place crowned 👑. CHAD has the best total placement
+across boards; CHUD has the worst. Missing a board costs one place beyond last,
+and ties share the title. Players are identified by user ID, so matching names
+never combine scores. Display names come from each player's latest submission
+that day, unless overridden by a nickname.
 
-The first result a person submits for a game on a given day is final. A second
-submission is refused, so a bad score cannot be quietly replaced.
+| Command | Response |
+| --- | --- |
+| `/games` | Links to all supported games |
+| `/leaderboard` | Current standings, including results submitted after the daily post |
+| `/chad`, `/chud` | The saved announcement for today, or a note that it is not decided yet |
 
-Days are bucketed by a fixed UTC offset rather than a named timezone, because
-Singapore has observed no DST since 1982 and this keeps the container free of a
-timezone database. A result sent after local midnight counts toward the new day.
+Commands reply where you ask; a DM check stays private. In groups, standings,
+announcements, and submissions are available only in the configured leaderboard
+group. Posted boards and saved announcements do not change with late submissions.
 
 ### Finding the group's chat ID
 
@@ -287,30 +250,9 @@ make logs
 Put that value in `.env` and restart. Until it is set, the leaderboard is off;
 link deduplication and `/games` still work.
 
-### Who may submit
-
-Only people the bot has seen in the group can submit results or read the board
-from a DM. The roster is learned rather than configured: any message in the
-group — ordinary conversation counts, since Group Privacy is off — adds its
-sender. Nobody has to post a result in the group to get on it.
-
-A DM from someone not on the roster is answered with a note asking them to say
-something in the group first, and nothing is recorded. Sending the bot a DM
-never adds anyone, so a stranger who finds the bot's username cannot put
-themselves on the board.
-
-Two consequences worth knowing: a member who has genuinely never said anything
-in the group has to speak once before their first submission, and someone who
-leaves the group stays on the roster until the database is cleared.
-
-Each member also has to message the bot once before it can reply to them —
-Telegram forbids bots from opening a conversation. Tapping the bot's name in the
-group's member list and pressing Start is enough.
-
 ### Adding a game
 
-Wordle, Connections, Krillion, and Fermi ship today. To add another, write a
-parser in `sfbot/games.py` that returns a `ParsedResult` (or `None`) and add a
+Write a parser in `sfbot/games.py` that returns a `ParsedResult` (or `None`) and add a
 `Game` entry with its name, emoji, URL, and parser to the `GAMES` tuple:
 
 - `puzzle_id` identifies the day's puzzle and is shown in the board heading.
@@ -337,17 +279,20 @@ not match, and add cases to `tests/test_games.py` from real share text.
 | `SFBOT_ACTION_WORD` | Unset | Verb for the repeat-poster callout; unset sends only the `sf` mention |
 | `SFBOT_NICKNAMES` | Unset | `user_id:nickname` pairs, comma separated; overrides Telegram names |
 
-## Behavior details
+## Reliability and storage
 
-- Deduplication is per Telegram chat, not global across every group.
-- Game submissions and `/leaderboard`, `/chad`, and `/chud` in groups are
-  accepted only in the configured leaderboard group. Members can also use DMs.
-- The earliest share remains the reply target for the five-day window.
+One process uses Telegram long polling and one SQLite file; no inbound network
+is needed. Game results are retained indefinitely; duplicate-link history expires.
+Known limitations and planned improvements are tracked in [TODO.md](TODO.md).
+
+- A permanent reply error or malformed update is logged and skipped so later
+  messages keep flowing. Transient update failures get at most three attempts
+  before the update is acknowledged. Existing submission and duplicate-reply
+  records remain in place even when their acknowledgement could not be sent.
+- Scheduled reminders and posts run independently of update failures and of
+  each other's request failures. Failed polling backs off up to 30 seconds.
 - Each repeated message triggers at most one `sf` reply per tweet, even if
   Telegram replays the update after a restart. A send with an uncertain outcome
   is not retried, so a failed request can leave that reply or its callout unsent.
 - If the original message was deleted, the current share becomes the new
   origin without sending an orphaned `sf` reply.
-- Text messages, media captions, and links hidden behind Telegram linked text
-  are supported.
-- `t.co` links are not resolved.
