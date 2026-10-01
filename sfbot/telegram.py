@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import json
 import logging
 import time
@@ -564,32 +566,41 @@ def post_due_leaderboard(
 
     # Sending before marking means a failed send is retried on the next poll
     # rather than silently swallowed.
-    standings = _send_leaderboard(
-        client,
-        store,
-        board_chat_id=board_chat_id,
-        to_chat_id=board_chat_id,
-        day=day,
-        nicknames=nicknames,
+    # Use one snapshot for the board, announcements, and saved winners.
+    # Original names are saved so removing a nickname restores the latest
+    # submitted name.
+    recorded = store.standings(chat_id=board_chat_id, local_date=day)
+    shown = [
+        GameStandings(
+            game=board.game,
+            puzzle_id=board.puzzle_id,
+            entries=tuple(
+                replace(entry, display_name=nicknames.get(entry.user_id, entry.display_name))
+                for entry in board.entries
+            ),
+        )
+        for board in recorded
+    ]
+    client.send_message(
+        chat_id=board_chat_id, text=format_standings(shown, local_date=day)
     )
-    chad = format_chad(standings, variation=_chad_variation(board_chat_id, day))
-    chud = format_chud(standings)
+    chads = chad_winners(recorded)
+    chuds = chud_winners(recorded)
+    chad = format_chad_winners(
+        chads, variation=_chad_variation(board_chat_id, day), nicknames=nicknames
+    )
+    chud = format_chud_winners(chuds, nicknames=nicknames)
     if chad is not None:
         client.send_message(chat_id=board_chat_id, text=chad)
     if chud is not None:
         client.send_message(chat_id=board_chat_id, text=chud)
-    # Who won is stored by user ID so the announcement can be repeated later
-    # under whatever nickname they go by then. The names stored alongside them
-    # are the ones submitted with the scores, not the nicknames applied above,
-    # so dropping a nickname falls back to the name the player signed up under.
-    recorded = store.standings(chat_id=board_chat_id, local_date=day)
     store.mark_posted(
         chat_id=board_chat_id,
         local_date=day,
         chad_message=chad,
         chud_message=chud,
-        chad_winners=chad_winners(recorded) if chad is not None else None,
-        chud_winners=chud_winners(recorded) if chud is not None else None,
+        chad_winners=chads if chad is not None else None,
+        chud_winners=chuds if chud is not None else None,
     )
     LOG.info("Posted the %s leaderboard to chat %s", day, board_chat_id)
 
@@ -663,49 +674,99 @@ def run_polling(
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
 ) -> None:
     offset: int | None = None
-    backoff = 1
-    LOG.info("sfbot is listening for messages")
+    poll_backoff = 1
+    request_errors = (
+        TelegramAPIError, urllib.error.URLError, TimeoutError, ConnectionError,
+        json.JSONDecodeError,
+    )
 
+    def run_scheduled_tasks() -> None:
+        if board_chat_id is None or post_minute is None:
+            return
+        # A failed reminder round must not prevent the daily post, and neither
+        # task may prevent incoming updates from being processed.
+        for name, task in (
+            ("reminders", send_due_reminders),
+            ("leaderboard", post_due_leaderboard),
+        ):
+            options: dict[str, Any] = {
+                "board_chat_id": board_chat_id,
+                "utc_offset_minutes": utc_offset_minutes,
+                "post_minute": post_minute,
+            }
+            if name == "leaderboard":
+                options["nicknames"] = nicknames
+            try:
+                task(client, store, **options)
+            except request_errors as error:
+                LOG.warning("Scheduled task %s failed (%s)", name, error)
+
+    LOG.info("sfbot is listening for messages")
     while True:
         try:
             updates = client.get_updates(offset=offset, poll_timeout=poll_timeout)
-            backoff = 1
-            for update in updates:
-                update_id = update.get("update_id")
-                message = update.get("message")
-                if isinstance(message, Mapping):
-                    handle_message(
-                        message,
-                        cache=cache,
-                        store=store,
-                        client=client,
-                        utc_offset_minutes=utc_offset_minutes,
-                        board_chat_id=board_chat_id,
-                        action_word=action_word,
-                        nicknames=nicknames,
-                    )
-                # Only acknowledge an update after all of its side effects have
-                # succeeded. A transient sendMessage failure is then retried.
-                if isinstance(update_id, int):
-                    offset = update_id + 1
+        except request_errors as error:
+            LOG.warning(
+                "Telegram polling failed (%s); retrying in %ss", error, poll_backoff
+            )
+            run_scheduled_tasks()
+            time.sleep(poll_backoff)
+            poll_backoff = min(poll_backoff * 2, 30)
+            continue
+        poll_backoff = 1
 
-            if board_chat_id is not None and post_minute is not None:
-                send_due_reminders(
-                    client,
-                    store,
-                    board_chat_id=board_chat_id,
-                    utc_offset_minutes=utc_offset_minutes,
-                    post_minute=post_minute,
-                )
-                post_due_leaderboard(
-                    client,
-                    store,
-                    board_chat_id=board_chat_id,
-                    utc_offset_minutes=utc_offset_minutes,
-                    post_minute=post_minute,
-                    nicknames=nicknames,
-                )
-        except (TelegramAPIError, urllib.error.URLError, TimeoutError) as error:
-            LOG.warning("Telegram request failed (%s); retrying in %ss", error, backoff)
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 30)
+        for update in updates:
+            if not isinstance(update, Mapping):
+                LOG.warning("Ignoring malformed Telegram update")
+                continue
+            update_id = update.get("update_id")
+            if not isinstance(update_id, int):
+                LOG.warning("Ignoring Telegram update without an integer ID")
+                continue
+            message = update.get("message")
+            if isinstance(message, Mapping):
+                # Bound retries so an unreachable sender or a persistently
+                # failing request cannot hold up every later update. Existing
+                # result/reply claims still protect against replayed effects.
+                for attempt in range(3):
+                    try:
+                        handle_message(
+                            message,
+                            cache=cache,
+                            store=store,
+                            client=client,
+                            utc_offset_minutes=utc_offset_minutes,
+                            board_chat_id=board_chat_id,
+                            action_word=action_word,
+                            nicknames=nicknames,
+                        )
+                    except request_errors as error:
+                        transient = not isinstance(error, TelegramAPIError) or (
+                            error.status == 429 or error.status >= 500
+                        )
+                        if not transient or attempt == 2:
+                            LOG.warning(
+                                "Skipping update %s after reply failure (%s)",
+                                update_id, error,
+                            )
+                            break
+                        delay = 2 ** attempt
+                        LOG.warning(
+                            "Update %s request failed (%s); retrying in %ss",
+                            update_id, error, delay,
+                        )
+                        run_scheduled_tasks()
+                        time.sleep(delay)
+                    except (ValueError, TypeError, KeyError, AttributeError) as error:
+                        LOG.warning(
+                            "Skipping malformed update %s (%s)",
+                            update_id, type(error).__name__,
+                        )
+                        break
+                    else:
+                        break
+            # Successful, malformed, and exhausted updates are all acknowledged;
+            # otherwise one permanent failure would poison the polling queue.
+            offset = update_id + 1
+
+        run_scheduled_tasks()

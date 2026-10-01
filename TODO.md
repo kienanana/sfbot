@@ -1,91 +1,95 @@
-# Production readiness TODO
+# Project backlog
 
-The project uses one existing Telegram bot and one production container on the
-group's homelab. Only one process may poll Telegram with the bot token at a
-time. Temporary downtime and loss of the non-critical five-day cache are
-acceptable.
+The bot runs as one process and one Docker container on the group's homelab.
+Only one instance may poll with the token at a time. Temporary downtime and loss
+of the five-day link cache are acceptable; game results are durable and have no
+retention window. Deployment checks below remain unverified by local tests.
 
-## P0 — Developer workflow
+## P1 — Reliability and result correctness
 
-- [x] Document the existing-bot prerequisite without a BotFather tutorial.
-- [x] Document local and homelab run commands.
-- [x] Document the one-bot, single-instance testing workflow.
-- [x] Confirm `.env` and `data/` are ignored by Git.
-- [x] Add `make run`, `make test`, and `make logs` commands.
+- [ ] Persist the processed Telegram update offset in SQLite and test restart
+      behavior for commands, submissions, and duplicate replies.
+- [ ] Track daily-post delivery per message (board, CHAD, CHUD). Save the
+      standings/announcement snapshot before sending and resume after the last
+      confirmed message on retry or restart. Test failures at each send and
+      define how to handle delivery whose response was lost; exactly-once
+      delivery cannot be inferred from a timeout.
+- [ ] Track reminder delivery per recipient so a network failure halfway through
+      the roster does not repeat successful DMs. Retry transient API errors
+      instead of treating every API failure as an unreachable member.
+- [ ] Catch up every unposted date with results through the latest due date after
+      an outage longer than one day. Test multiple overdue dates and empty days.
+- [ ] Reject incomplete or impossible Connections grids before locking a first
+      submission: unique solved colours, at most four categories, a terminal win
+      or loss, and no guesses after the terminal result. Restrict grid parsing
+      to the matched share block and add invalid-grid regressions.
+- [ ] Handle SIGTERM cleanly and verify SQLite closure for SIGTERM and SIGINT.
+- [ ] Give clear startup errors for a configured webhook, invalid token, or a
+      conflicting poller rather than retrying permanent polling errors forever.
+- [ ] Respect Telegram's rate-limit retry delay. Decide whether exhausted update
+      failures need a durable retry queue; current reply processing tries at most
+      three times, then logs and acknowledges the update to keep the queue moving.
+- [ ] Define recovery for a stored submission whose confirmation failed: replay
+      currently responds "already submitted" rather than restoring confirmation.
+- [ ] Verify logs never expose the token or message body, including exceptions.
 
-## P0 — Runtime reliability
+## P2 — Efficiency and operations
 
-- [ ] Persist the last successfully processed Telegram update ID in SQLite.
-- [x] Prevent a replayed duplicate update from sending a second `sf` response.
-- [ ] Catch up daily posts missed during outages longer than one day.
-- [ ] Isolate failures per update so one malformed message cannot stop polling.
-- [ ] Handle `SIGINT` and `SIGTERM` cleanly and close SQLite before exiting.
-- [ ] Verify transient Telegram and network failures retry the pending update.
-- [ ] Report a clear startup error if a Telegram webhook is already configured.
-- [ ] Keep logs useful without exposing the bot token or message text.
-
-## P1 — Automated checks
-
-- [ ] Test polling offsets and restart/replay behavior.
-- [ ] Test Telegram API errors and network retry behavior.
-- [ ] Test messages containing multiple distinct and repeated tweet links.
-- [ ] Test the exact five-day expiration boundary.
-- [ ] Test graceful shutdown and database closure.
-- [x] Add GitHub Actions to run tests and bytecode compilation.
-- [x] Build the Docker image in CI.
-
-## P1 — Homelab deployment
-
-- [x] Choose the group's homelab as the always-on production host.
-- [ ] Confirm Docker and Docker Compose are installed on the host.
-- [ ] Clone the repository and create the production `.env` securely.
-- [ ] Deploy exactly one `sfbot` container.
-- [ ] Confirm Docker starts at boot and `restart: unless-stopped` works.
+- [ ] Throttle tweet-cache expiry cleanup instead of running two deletes for
+      every extracted status ID. Preserve stale-update and expiration semantics.
+- [ ] Avoid rewriting roster membership on every ordinary group message; keep
+      membership checks and any required last-seen behavior intact.
 - [ ] Add Docker log rotation and reasonable CPU/memory limits.
+- [ ] Add a health check based on recent successful polling, without launching
+      another poller or exposing credentials.
+- [ ] Document status, restart-count inspection, deployment, and rollback.
+
+## Remaining automated coverage
+
+- [ ] Test the real HTTP wrapper with mocked responses: success, API/HTTP errors,
+      invalid JSON, connection failures, and rate-limit parameters.
+- [ ] Test persisted polling offsets and replay across a process restart once
+      offset storage is implemented.
+- [ ] Test one message containing multiple distinct and repeated tweet links,
+      including a failure partway through processing.
+- [ ] Test the exact five-day expiration boundary and cache persistence after
+      reopening the database.
+- [ ] Add shutdown, delivery-resumption, outage catch-up, and invalid-grid tests
+      alongside the corresponding backlog fixes above.
+
+## Implemented and verified locally
+
+- [x] Isolate permanent reply failures and malformed updates; later updates and
+      scheduled tasks keep running.
+- [x] Bound transient update retries, back off failed polling, and isolate reminder
+      failures from daily posts. Polling-loop regression tests cover these paths.
+- [x] Calculate CHAD/CHUD totals by Telegram user ID. Tests cover identical names,
+      duplicate nicknames, name changes, and missing-game penalties.
+- [x] Use the latest submitted name for each player within the day's standings;
+      configured nicknames still override it.
+- [x] Preserve the plural CHUD emoji change and update both expected messages.
+- [x] Persist duplicate-link origins and reply claims; prevent duplicate `sf`
+      replies after replay and promote deleted origins.
+- [x] Collect group-member results by DM, confirm submissions privately, react to
+      group submissions, and enforce the first result per game/day.
+- [x] Parse Wordle, Krillion, Fermi, and Connections share text; provide `/games`,
+      `/leaderboard`, `/chad`, and `/chud`.
+- [x] Schedule daily boards and reminders; save posted winner announcements.
+- [x] Document configuration, nicknames, local/homelab commands, and the one-bot
+      testing workflow; ignore `.env` and local data in Git.
+- [x] Provide Make targets and CI for tests, Python compilation, and Docker builds.
+
+## Homelab verification
+
+- [ ] Confirm Docker/Compose installation, secure production `.env` permissions,
+      and exactly one running bot container.
+- [ ] Confirm Docker starts at boot and `restart: unless-stopped` works after a
+      host reboot.
+- [ ] Verify rebuilding the container preserves the `sfbot-data` volume.
 - [ ] Perform and document one deployment and rollback.
-
-## P2 — Lightweight operations
-
-- [ ] Add a container health check based on recent successful Telegram polling.
-- [ ] Document how to inspect status, logs, and container restart count.
-- [ ] Confirm container rebuilds preserve the `sfbot-data` volume.
-
-## P1 — Daily games leaderboard
-
-- [x] Collect results by direct message so the group sees no share text.
-- [x] Confirm a DM'd result in the DM, and a group paste with a 👍.
-- [x] Serve `/leaderboard` on demand and post automatically at 21:00 SGT.
-- [x] Make the first result of a game on a day final.
-- [x] Add a Krillion parser from real share text.
-- [x] Add a Fermi parser from real share text.
-- [x] Add a Connections parser from real share text.
-- [x] Add `/games` with links to the supported games.
-- [x] Show game emojis and crown the first-place player or tied players.
-- [x] Restrict submissions to people the bot has seen in the group.
-- [x] DM each member their outstanding games an hour before the daily post.
-- [x] Decided: no retention window. Results are ~600 KB/year and are the
-      durable artifact, unlike the five-day tweet cache.
-
-## Release acceptance test
-
-- [ ] A first Twitter/X link is stored without a response.
-- [ ] Sharing the same link again replies `sf @sharer` to the original message.
-- [ ] Equivalent `twitter.com` and `x.com` URL variants match.
-- [ ] Tracking parameters and `/photo/1` suffixes do not affect matching.
-- [ ] Different Telegram chats have independent caches.
-- [ ] The cache survives a container restart.
-- [ ] An expired entry becomes a new origin.
-- [ ] A deleted original message promotes the current share safely.
-- [ ] The bot recovers after a temporary network failure.
-- [ ] The bot starts automatically after the homelab reboots.
-- [ ] A Wordle result DM'd to the bot is confirmed and never reaches the group.
-- [ ] A second Wordle DM from the same person is refused.
-- [ ] Each member can DM the bot after pressing Start.
-- [ ] A DM from a non-member is refused and nothing is recorded.
-- [ ] Talking in the group is enough to become able to submit by DM.
-- [ ] `/leaderboard` lists each game's board, best result first.
-- [ ] `/games` links to all four supported games.
-- [ ] Each game heading shows its emoji and first place shows a crown.
-- [ ] The daily post arrives once at 21:00 SGT and not again after a restart.
-- [ ] Reminders arrive by DM at 20:00 SGT and name only outstanding games.
-- [ ] A repeated link's callout names the reposter when an action word is set.
+- [ ] Smoke-test original and repeated Twitter/X links, URL variants, expiration,
+      chat isolation, deleted origins, and cache survival across restart.
+- [ ] Smoke-test member/stranger DMs, first-submission locking, group reactions,
+      and all four commands, including tied winners and nickname overrides.
+- [ ] Verify 20:00 SGT reminders and 21:00 boards on the live group, including
+      post-restart behavior and recovery after a temporary network outage.

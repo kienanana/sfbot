@@ -227,7 +227,8 @@ class LeaderboardStore:
         with self._lock:
             rows = self._connection.execute(
                 """
-                SELECT game, puzzle_id, user_id, display_name, score, rank_key, detail
+                SELECT game, puzzle_id, user_id, display_name, score, rank_key, detail,
+                       submitted_at
                 FROM game_results
                 WHERE chat_id = ? AND local_date = ?
                 ORDER BY game, puzzle_id, rank_key, submitted_at
@@ -236,6 +237,13 @@ class LeaderboardStore:
             ).fetchall()
 
         current_nicknames = nicknames if nicknames is not None else {}
+        # A player can change their Telegram name between submissions. Render
+        # all their entries with the latest submitted name, but keep identity
+        # separate from that label when calculating daily winners.
+        names = {
+            int(row[2]): str(row[3])
+            for row in sorted(rows, key=lambda row: row[7])
+        }
         boards: list[GameStandings] = []
         for (game, puzzle_id), game_rows in groupby(
             rows, key=lambda row: (row[0], row[1])
@@ -249,7 +257,7 @@ class LeaderboardStore:
                         Entry(
                             user_id=int(row[2]),
                             display_name=current_nicknames.get(
-                                int(row[2]), str(row[3])
+                                int(row[2]), names[int(row[2])]
                             ),
                             score=str(row[4]),
                             rank_key=float(row[5]),
@@ -402,28 +410,27 @@ def _placings(entries: Sequence[Entry]) -> list[int]:
     return places
 
 
-def _total_placings(standings: Sequence[GameStandings]) -> dict[str, int]:
+def _total_placings(standings: Sequence[GameStandings]) -> dict[int, int]:
     """Sum placements across boards; skipping costs one worse than last place."""
-    totals: dict[str, int] = {}
+    totals: dict[int, int] = {}
     for board in standings:
         for entry in board.entries:
-            totals.setdefault(entry.display_name, 0)
+            totals.setdefault(entry.user_id, 0)
     for board in standings:
         places = _placings(board.entries)
         skipped = max(places) + 1
         played = {
-            entry.display_name: place for entry, place in zip(board.entries, places)
+            entry.user_id: place for entry, place in zip(board.entries, places)
         }
-        for name in totals:
-            totals[name] += played.get(name, skipped)
+        for user_id in totals:
+            totals[user_id] += played.get(user_id, skipped)
     return totals
 
 
 def _winner_entries(standings: Sequence[GameStandings], *, best: bool) -> list[Entry]:
     """Return one entry per winning player, named in sorted order.
 
-    The totals are keyed by name, as they always have been, so an entry is
-    picked to carry the user ID of whoever that name belonged to.
+    Players are identified by user ID independently of their display names.
     """
 
     totals = _total_placings(standings)
@@ -431,13 +438,13 @@ def _winner_entries(standings: Sequence[GameStandings], *, best: bool) -> list[E
         return []
 
     target = min(totals.values()) if best else max(totals.values())
-    winning = {name for name, total in totals.items() if total == target}
-    carriers: dict[str, Entry] = {}
+    winning = {user_id for user_id, total in totals.items() if total == target}
+    carriers: dict[int, Entry] = {}
     for board in standings:
         for entry in board.entries:
-            if entry.display_name in winning:
-                carriers.setdefault(entry.display_name, entry)
-    return [carriers[name] for name in sorted(carriers)]
+            if entry.user_id in winning:
+                carriers.setdefault(entry.user_id, entry)
+    return sorted(carriers.values(), key=lambda entry: (entry.display_name, entry.user_id))
 
 
 def chad_winners(standings: Sequence[GameStandings]) -> list[Winner]:
@@ -528,7 +535,7 @@ def format_chud_winners(
         return None
     if len(names) == 1:
         return f"🚽 Ding ding ding! {names[0]} is the CHUD of the day!"
-    return f"Ding ding ding! {_named_winners(names)} are the CHUDs of the day!"
+    return f"🚽 Ding ding ding! {_named_winners(names)} are the CHUDs of the day!"
 
 
 def format_chad(
