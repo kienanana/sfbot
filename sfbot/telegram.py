@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import json
 import logging
 import time
@@ -17,8 +19,14 @@ from .games import GAMES, parse_result
 from .leaderboard import (
     GameStandings,
     LeaderboardStore,
+    PostedAnnouncement,
+    apply_nicknames,
+    chad_winners,
+    chud_winners,
     format_chad,
+    format_chad_winners,
     format_chud,
+    format_chud_winners,
     format_standings,
 )
 from .links import extract_tweet_ids
@@ -335,6 +343,50 @@ def _record_submission(
         )
 
 
+def _render_announcement(
+    announcement: PostedAnnouncement,
+    *,
+    store: LeaderboardStore,
+    board_chat_id: int,
+    day: str,
+    is_chad: bool,
+    nicknames: Mapping[int, str],
+) -> str | None:
+    """Name the day's CHAD or CHUD the way the bot would name them today.
+
+    A day this build posted records who won, so they are renamed by whatever
+    nickname they go by now. A day an older build posted recorded only the
+    message it sent, so the names in it are swapped for nicknames where they
+    still match a player that day. Neither path recomputes the winner: a result
+    that arrives after the post must not revise it.
+    """
+
+    if announcement.winners is not None:
+        if is_chad:
+            return format_chad_winners(
+                announcement.winners,
+                variation=_chad_variation(board_chat_id, day),
+                nicknames=nicknames,
+            )
+        return format_chud_winners(announcement.winners, nicknames=nicknames)
+
+    if announcement.message is not None:
+        return apply_nicknames(
+            announcement.message,
+            players=store.daily_names(chat_id=board_chat_id, local_date=day),
+            nicknames=nicknames,
+        )
+
+    # A day posted before announcements were saved at all has only its day's
+    # results to go on.
+    standings = store.standings(
+        chat_id=board_chat_id, local_date=day, nicknames=nicknames
+    )
+    if is_chad:
+        return format_chad(standings, variation=_chad_variation(board_chat_id, day))
+    return format_chud(standings)
+
+
 def handle_message(
     message: Mapping[str, object],
     *,
@@ -405,27 +457,23 @@ def handle_message(
             )
             return
 
-        posted = store.posted_messages(chat_id=board_chat_id, local_date=day)
+        posted = store.posted_announcements(chat_id=board_chat_id, local_date=day)
         title = "CHAD" if command == _CHAD_COMMAND else "CHUD"
         if posted is None:
             client.send_message(
                 chat_id=chat_id, text=f"The {title} of the day hasn't been decided yet."
             )
             return
-        message = posted[0] if command == _CHAD_COMMAND else posted[1]
-        if message is None:
-            # Days posted before this feature have no saved message.
-            standings = store.standings(
-                chat_id=board_chat_id, local_date=day, nicknames=nicknames
-            )
-            if command == _CHAD_COMMAND:
-                message = format_chad(
-                    standings, variation=_chad_variation(board_chat_id, day)
-                )
-            else:
-                message = format_chud(standings)
-        if message is not None:
-            client.send_message(chat_id=chat_id, text=message)
+        announcement = _render_announcement(
+            posted[0] if command == _CHAD_COMMAND else posted[1],
+            store=store,
+            board_chat_id=board_chat_id,
+            day=day,
+            is_chad=command == _CHAD_COMMAND,
+            nicknames=nicknames,
+        )
+        if announcement is not None:
+            client.send_message(chat_id=chat_id, text=announcement)
         return
 
     tweet_ids = extract_tweet_ids(message)
@@ -518,16 +566,30 @@ def post_due_leaderboard(
 
     # Sending before marking means a failed send is retried on the next poll
     # rather than silently swallowed.
-    standings = _send_leaderboard(
-        client,
-        store,
-        board_chat_id=board_chat_id,
-        to_chat_id=board_chat_id,
-        day=day,
-        nicknames=nicknames,
+    # Use one snapshot for the board, announcements, and saved winners.
+    # Original names are saved so removing a nickname restores the latest
+    # submitted name.
+    recorded = store.standings(chat_id=board_chat_id, local_date=day)
+    shown = [
+        GameStandings(
+            game=board.game,
+            puzzle_id=board.puzzle_id,
+            entries=tuple(
+                replace(entry, display_name=nicknames.get(entry.user_id, entry.display_name))
+                for entry in board.entries
+            ),
+        )
+        for board in recorded
+    ]
+    client.send_message(
+        chat_id=board_chat_id, text=format_standings(shown, local_date=day)
     )
-    chad = format_chad(standings, variation=_chad_variation(board_chat_id, day))
-    chud = format_chud(standings)
+    chads = chad_winners(recorded)
+    chuds = chud_winners(recorded)
+    chad = format_chad_winners(
+        chads, variation=_chad_variation(board_chat_id, day), nicknames=nicknames
+    )
+    chud = format_chud_winners(chuds, nicknames=nicknames)
     if chad is not None:
         client.send_message(chat_id=board_chat_id, text=chad)
     if chud is not None:
@@ -537,6 +599,8 @@ def post_due_leaderboard(
         local_date=day,
         chad_message=chad,
         chud_message=chud,
+        chad_winners=chads if chad is not None else None,
+        chud_winners=chuds if chud is not None else None,
     )
     LOG.info("Posted the %s leaderboard to chat %s", day, board_chat_id)
 

@@ -553,6 +553,114 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(len(self.client.sent), 1)
         self.assertIn("roster", self.client.sent[0][1])
 
+    def test_a_nickname_change_reaches_the_chad_and_chud_commands(self) -> None:
+        self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
+        self.dm("Wordle 1,234 5/6", user_id=6, name="Bob", message_id=8)
+        post_due_leaderboard(
+            self.client,  # type: ignore[arg-type]
+            self.store,
+            board_chat_id=GROUP,
+            utc_offset_minutes=SGT_OFFSET,
+            post_minute=21 * 60,
+            now=2_000_035_800,
+        )
+        self.client.sent.clear()
+
+        self.ask_both(2_000_035_900)
+
+        chad, chud = self.client.sent
+        self.assertTrue(
+            chad[1].startswith("👑 Ding ding ding! Juan is the CHAD of the day!\n")
+        )
+        self.assertEqual(chud[1], "🚽 Ding ding ding! Diddy is the CHUD of the day!")
+
+    def test_an_announcement_from_an_older_build_still_follows_a_nickname(self) -> None:
+        # A day posted before winners were recorded leaves only its message,
+        # so the names in it are the only way back to the players.
+        for user_id, name, text in (
+            (5, "Alice", "Wordle 1,234 2/6"),
+            (6, "Bob", "Wordle 1,234 5/6"),
+        ):
+            result = parse_result(text)
+            assert result is not None
+            self.store.record(
+                chat_id=GROUP,
+                local_date="2033-05-18",
+                user_id=user_id,
+                display_name=name,
+                result=result,
+                submitted_at=2_000_000_000 + user_id,
+            )
+        self.store.mark_posted(
+            chat_id=GROUP,
+            local_date="2033-05-18",
+            chad_message="👑 Ding ding ding! Alice is the CHAD of the day!\nwahoo!",
+            chud_message="🚽 Ding ding ding! Bob is the CHUD of the day!",
+        )
+
+        self.ask_both(2_000_035_900)
+
+        chad, chud = self.client.sent
+        self.assertEqual(
+            chad[1], "👑 Ding ding ding! Juan is the CHAD of the day!\nwahoo!"
+        )
+        self.assertEqual(chud[1], "🚽 Ding ding ding! Diddy is the CHUD of the day!")
+
+    def test_a_day_posted_with_no_saved_announcement_is_recomputed(self) -> None:
+        self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
+        self.dm("Wordle 1,234 5/6", user_id=6, name="Bob", message_id=8)
+        # Posted before announcements were saved at all.
+        self.store.mark_posted(chat_id=GROUP, local_date="2033-05-18")
+        self.client.sent.clear()
+
+        self.ask_both(2_000_035_900)
+
+        chad, chud = self.client.sent
+        self.assertTrue(
+            chad[1].startswith("👑 Ding ding ding! Juan is the CHAD of the day!\n")
+        )
+        self.assertEqual(chud[1], "🚽 Ding ding ding! Diddy is the CHUD of the day!")
+
+    def test_a_nickname_dropped_after_the_post_falls_back_to_the_name(self) -> None:
+        self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
+        self.dm("Wordle 1,234 5/6", user_id=6, name="Bob", message_id=8)
+        post_due_leaderboard(
+            self.client,  # type: ignore[arg-type]
+            self.store,
+            board_chat_id=GROUP,
+            utc_offset_minutes=SGT_OFFSET,
+            post_minute=21 * 60,
+            now=2_000_035_800,
+            nicknames={5: "Juan", 6: "Diddy"},
+        )
+        self.client.sent.clear()
+
+        self.ask_both(2_000_035_900, nicknames={})
+
+        chad, chud = self.client.sent
+        self.assertTrue(
+            chad[1].startswith("👑 Ding ding ding! Alice is the CHAD of the day!\n")
+        )
+        self.assertEqual(chud[1], "🚽 Ding ding ding! Bob is the CHUD of the day!")
+
+    def ask_both(
+        self, date: int, nicknames: dict[int, str] | None = None
+    ) -> None:
+        """Ask the group for the day's CHAD and CHUD as it would today."""
+
+        for command in ("/chad", "/chud"):
+            self.handle(
+                {
+                    "chat": {"id": GROUP, "type": "supergroup"},
+                    "message_id": 30,
+                    "date": date,
+                    "from": {"id": 5, "first_name": "Alice"},
+                    "text": command,
+                    "entities": command_entity(command),
+                },
+                nicknames={5: "Juan", 6: "Diddy"} if nicknames is None else nicknames,
+            )
+
     def test_games_command_links_every_supported_game(self) -> None:
         for chat_id, chat_type, command in (
             (DM, "private", "/games"),
@@ -1086,6 +1194,54 @@ class PostDueLeaderboardTests(unittest.TestCase):
         self.post(2_000_035_800, nicknames={5: "Juan"})
 
         self.assertIn("Juan - 3/6", self.client.sent[0][1])
+
+    def test_shared_nicknames_keep_posted_and_saved_winners_consistent(self) -> None:
+        for user_id, name, score in ((5, "Alice", "2/6"), (6, "Bob", "5/6")):
+            result = parse_result(f"Wordle 1,234 {score}")
+            assert result is not None
+            self.store.record(
+                chat_id=GROUP, local_date="2033-05-18", user_id=user_id,
+                display_name=name, result=result, submitted_at=2_000_000_000 + user_id,
+            )
+        self.post(2_000_035_800, nicknames={5: "Alex", 6: "Alex"})
+        announcements = self.store.posted_announcements(
+            chat_id=GROUP, local_date="2033-05-18"
+        )
+        assert announcements is not None
+        self.assertEqual(announcements[0].winners, ((5, "Alice"),))
+        self.assertEqual(announcements[1].winners, ((6, "Bob"),))
+        self.assertIn("Alex is the CHAD", self.client.sent[1][1])
+        self.assertIn("Alex is the CHUD", self.client.sent[2][1])
+        self.assertEqual(announcements[0].message, self.client.sent[1][1])
+        self.assertEqual(announcements[1].message, self.client.sent[2][1])
+
+    def test_the_post_records_who_won_by_user_id(self) -> None:
+        for user_id, name, text in (
+            (5, "Alice", "Wordle 1,234 2/6"),
+            (6, "Bob", "Wordle 1,234 5/6"),
+        ):
+            result = parse_result(text)
+            assert result is not None
+            self.store.record(
+                chat_id=GROUP,
+                local_date="2033-05-18",
+                user_id=user_id,
+                display_name=name,
+                result=result,
+                submitted_at=2_000_000_000 + user_id,
+            )
+
+        self.post(2_000_035_800, nicknames={5: "Juan"})
+
+        announcements = self.store.posted_announcements(
+            chat_id=GROUP, local_date="2033-05-18"
+        )
+        assert announcements is not None
+        # The nickname reaches the message, but the record keeps the name that
+        # came with the score, so dropping the nickname falls back to it.
+        self.assertEqual(announcements[0].winners, ((5, "Alice"),))
+        self.assertEqual(announcements[1].winners, ((6, "Bob"),))
+        self.assertIn("Juan is the CHAD", announcements[0].message or "")
 
 
 if __name__ == "__main__":

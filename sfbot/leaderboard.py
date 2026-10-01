@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 import threading
 from collections.abc import Mapping, Sequence
@@ -10,6 +12,10 @@ from itertools import groupby
 from pathlib import Path
 
 from .games import GAME_BY_NAME, ParsedResult
+
+# A player named in an announcement: their user ID and the name recorded when
+# the announcement was made. The ID is what survives a name change.
+Winner = tuple[int, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +32,14 @@ class GameStandings:
     game: str
     puzzle_id: str
     entries: tuple[Entry, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PostedAnnouncement:
+    """What a posted day recorded for one of the two announcements."""
+
+    message: str | None
+    winners: tuple[Winner, ...] | None
 
 
 class LeaderboardStore:
@@ -73,6 +87,8 @@ class LeaderboardStore:
                 local_date TEXT NOT NULL,
                 chad_message TEXT,
                 chud_message TEXT,
+                chad_winners TEXT,
+                chud_winners TEXT,
                 PRIMARY KEY (chat_id, local_date)
             ) WITHOUT ROWID
             """
@@ -80,7 +96,12 @@ class LeaderboardStore:
         posted_columns = {
             row[1] for row in self._connection.execute("PRAGMA table_info(posted_days)")
         }
-        for column in ("chad_message", "chud_message"):
+        for column in (
+            "chad_message",
+            "chud_message",
+            "chad_winners",
+            "chud_winners",
+        ):
             if column not in posted_columns:
                 self._connection.execute(
                     f"ALTER TABLE posted_days ADD COLUMN {column} TEXT"
@@ -273,17 +294,50 @@ class LeaderboardStore:
         local_date: str,
         chad_message: str | None = None,
         chud_message: str | None = None,
+        chad_winners: Sequence[Winner] | None = None,
+        chud_winners: Sequence[Winner] | None = None,
     ) -> bool:
         """Record that a chat's daily post is done, returning False if it already was."""
 
         with self._lock, self._connection:
             cursor = self._connection.execute(
                 """INSERT OR IGNORE INTO posted_days
-                   (chat_id, local_date, chad_message, chud_message)
-                   VALUES (?, ?, ?, ?)""",
-                (chat_id, local_date, chad_message, chud_message),
+                   (chat_id, local_date, chad_message, chud_message,
+                    chad_winners, chud_winners)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    chat_id,
+                    local_date,
+                    chad_message,
+                    chud_message,
+                    _encode_winners(chad_winners),
+                    _encode_winners(chud_winners),
+                ),
             )
         return cursor.rowcount == 1
+
+    def posted_announcements(
+        self, *, chat_id: int, local_date: str
+    ) -> tuple[PostedAnnouncement, PostedAnnouncement] | None:
+        """Return what a posted day recorded, or None if it was never posted.
+
+        A day posted by an older build has no saved winners, and the oldest
+        posted days have no saved announcement texts either.
+        """
+
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT chad_message, chud_message, chad_winners, chud_winners
+                   FROM posted_days
+                   WHERE chat_id = ? AND local_date = ?""",
+                (chat_id, local_date),
+            ).fetchone()
+        if row is None:
+            return None
+        return (
+            PostedAnnouncement(message=row[0], winners=_decode_winners(row[2])),
+            PostedAnnouncement(message=row[1], winners=_decode_winners(row[3])),
+        )
 
     def posted_messages(
         self, *, chat_id: int, local_date: str
@@ -293,13 +347,23 @@ class LeaderboardStore:
         Older posted days have no saved announcement texts.
         """
 
+        announcements = self.posted_announcements(
+            chat_id=chat_id, local_date=local_date
+        )
+        if announcements is None:
+            return None
+        return (announcements[0].message, announcements[1].message)
+
+    def daily_names(self, *, chat_id: int, local_date: str) -> list[Winner]:
+        """Return each player's recorded name that day, for naming them later."""
+
         with self._lock:
-            row = self._connection.execute(
-                """SELECT chad_message, chud_message FROM posted_days
+            rows = self._connection.execute(
+                """SELECT DISTINCT user_id, display_name FROM game_results
                    WHERE chat_id = ? AND local_date = ?""",
                 (chat_id, local_date),
-            ).fetchone()
-        return (row[0], row[1]) if row is not None else None
+            ).fetchall()
+        return [(int(row[0]), str(row[1])) for row in rows]
 
     def is_awaiting_reminder(self, *, chat_id: int, local_date: str) -> bool:
         """Return whether a day's reminder round has not been sent yet."""
@@ -346,7 +410,7 @@ def _placings(entries: Sequence[Entry]) -> list[int]:
     return places
 
 
-def _total_placings(standings: list[GameStandings]) -> dict[int, int]:
+def _total_placings(standings: Sequence[GameStandings]) -> dict[int, int]:
     """Sum placements across boards; skipping costs one worse than last place."""
     totals: dict[int, int] = {}
     for board in standings:
@@ -363,19 +427,55 @@ def _total_placings(standings: list[GameStandings]) -> dict[int, int]:
     return totals
 
 
-def _winner_names(standings: list[GameStandings], user_ids: list[int]) -> list[str]:
-    names = {
-        entry.user_id: entry.display_name
-        for board in standings
-        for entry in board.entries
-    }
-    return sorted(names[user_id] for user_id in user_ids)
+def _winner_entries(standings: Sequence[GameStandings], *, best: bool) -> list[Entry]:
+    """Return one entry per winning player, named in sorted order.
+
+    Players are identified by user ID independently of their display names.
+    """
+
+    totals = _total_placings(standings)
+    if not totals:
+        return []
+
+    target = min(totals.values()) if best else max(totals.values())
+    winning = {user_id for user_id, total in totals.items() if total == target}
+    carriers: dict[int, Entry] = {}
+    for board in standings:
+        for entry in board.entries:
+            if entry.user_id in winning:
+                carriers.setdefault(entry.user_id, entry)
+    return sorted(carriers.values(), key=lambda entry: (entry.display_name, entry.user_id))
+
+
+def chad_winners(standings: Sequence[GameStandings]) -> list[Winner]:
+    """Return whoever earned the best total placement, sharing ties."""
+
+    return [
+        (entry.user_id, entry.display_name)
+        for entry in _winner_entries(standings, best=True)
+    ]
+
+
+def chud_winners(standings: Sequence[GameStandings]) -> list[Winner]:
+    """Return whoever earned the worst total placement, sharing ties."""
+
+    return [
+        (entry.user_id, entry.display_name)
+        for entry in _winner_entries(standings, best=False)
+    ]
 
 
 def _named_winners(names: list[str]) -> str:
     if len(names) == 1:
         return names[0]
     return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
+def _named(winners: Sequence[Winner], nicknames: Mapping[int, str] | None) -> list[str]:
+    """Return the names to show, current nicknames winning over recorded ones."""
+
+    current = nicknames or {}
+    return sorted(current.get(user_id, name) for user_id, name in winners)
 
 
 _CHAD_LINES_BOTH = (
@@ -401,41 +501,143 @@ _CHAD_LINES_SINGULAR = (
 _CHAD_LINES_PLURAL = ("are you guys poly? 👀",)
 
 
-def format_chad(standings: list[GameStandings], *, variation: int = 0) -> str | None:
+def format_chad_winners(
+    winners: Sequence[Winner],
+    *,
+    variation: int = 0,
+    nicknames: Mapping[int, str] | None = None,
+) -> str | None:
     """Name the best total placement, sharing ties, with a fitting closing line."""
 
-    totals = _total_placings(standings)
-    if not totals:
+    names = _named(winners, nicknames)
+    if not names:
         return None
 
-    best = min(totals.values())
-    chads = _winner_names(
-        standings, [user_id for user_id, total in totals.items() if total == best]
-    )
     lines = _CHAD_LINES_BOTH + (
-        _CHAD_LINES_SINGULAR if len(chads) == 1 else _CHAD_LINES_PLURAL
+        _CHAD_LINES_SINGULAR if len(names) == 1 else _CHAD_LINES_PLURAL
     )
-    verb = "is the CHAD" if len(chads) == 1 else "are the CHADs"
+    verb = "is the CHAD" if len(names) == 1 else "are the CHADs"
     return (
-        f"👑 Ding ding ding! {_named_winners(chads)} {verb} of the day!\n"
+        f"👑 Ding ding ding! {_named_winners(names)} {verb} of the day!\n"
         f"{lines[variation % len(lines)]}"
     )
 
 
-def format_chud(standings: list[GameStandings]) -> str | None:
+def format_chud_winners(
+    winners: Sequence[Winner],
+    *,
+    nicknames: Mapping[int, str] | None = None,
+) -> str | None:
     """Name whoever did worst across the day's games, sharing ties."""
 
-    totals = _total_placings(standings)
-    if not totals:
+    names = _named(winners, nicknames)
+    if not names:
+        return None
+    if len(names) == 1:
+        return f"🚽 Ding ding ding! {names[0]} is the CHUD of the day!"
+    return f"🚽 Ding ding ding! {_named_winners(names)} are the CHUDs of the day!"
+
+
+def format_chad(
+    standings: Sequence[GameStandings],
+    *,
+    variation: int = 0,
+    nicknames: Mapping[int, str] | None = None,
+) -> str | None:
+    """Name the best total placement from a day's standings."""
+
+    return format_chad_winners(
+        chad_winners(standings), variation=variation, nicknames=nicknames
+    )
+
+
+def format_chud(
+    standings: Sequence[GameStandings],
+    *,
+    nicknames: Mapping[int, str] | None = None,
+) -> str | None:
+    """Name whoever did worst across a day's standings, sharing ties."""
+
+    return format_chud_winners(chud_winners(standings), nicknames=nicknames)
+
+
+def apply_nicknames(
+    text: str,
+    *,
+    players: Sequence[Winner],
+    nicknames: Mapping[int, str],
+) -> str:
+    """Swap the recorded names in a frozen announcement for nicknames.
+
+    Used for announcements a day recorded as text alone, before the winners
+    were saved: those are named by whoever the players were at the time. Only
+    the line that names them is rewritten, since a CHAD announcement's closing
+    line is a joke that may repeat a player's name. A name is replaced only
+    where it whole-word matches and belongs to a single nickname, so a name two
+    players share is left alone rather than guessed at.
+    """
+
+    candidates: dict[str, set[str]] = {}
+    for user_id, name in players:
+        nickname = nicknames.get(user_id)
+        if name and nickname:
+            candidates.setdefault(name, set()).add(nickname)
+    replacements = {
+        name: next(iter(found))
+        for name, found in candidates.items()
+        if len(found) == 1
+    }
+
+    # Longest first, so replacing a shorter name cannot eat part of a longer
+    # one that is about to be replaced itself.
+    named_line, newline, closing = text.partition("\n")
+    for name in sorted(replacements, key=len, reverse=True):
+        replacement = replacements[name]
+        named_line = re.sub(
+            rf"(?<!\w){re.escape(name)}(?!\w)",
+            lambda _match, shown=replacement: shown,
+            named_line,
+        )
+    return named_line + newline + closing
+
+
+def _encode_winners(winners: Sequence[Winner] | None) -> str | None:
+    """Render winners as JSON for storage, or None when there are none."""
+
+    if winners is None:
+        return None
+    pairs = [[user_id, name] for user_id, name in winners]
+    return json.dumps(pairs, ensure_ascii=False)
+
+
+def _decode_winners(raw: object) -> tuple[Winner, ...] | None:
+    """Read stored winners, treating anything unreadable as unsaved.
+
+    A day posted before winners were stored, or with a row this build cannot
+    parse, falls back to the announcement text it recorded.
+    """
+
+    if not isinstance(raw, str):
+        return None
+    try:
+        stored = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(stored, list):
         return None
 
-    worst = max(totals.values())
-    chuds = _winner_names(
-        standings, [user_id for user_id, total in totals.items() if total == worst]
-    )
-    if len(chuds) == 1:
-        return f"🚽 Ding ding ding! {chuds[0]} is the CHUD of the day!"
-    return f"🚽 Ding ding ding! {_named_winners(chuds)} are the CHUDs of the day!"
+    winners: list[Winner] = []
+    for item in stored:
+        if not isinstance(item, list) or len(item) != 2:
+            return None
+        user_id, name = item
+        if not isinstance(name, str):
+            return None
+        try:
+            winners.append((int(user_id), name))
+        except (TypeError, ValueError):
+            return None
+    return tuple(winners) or None
 
 
 def format_standings(standings: list[GameStandings], *, local_date: str) -> str:

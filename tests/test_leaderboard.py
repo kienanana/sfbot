@@ -8,8 +8,14 @@ from sfbot.leaderboard import (
     Entry,
     GameStandings,
     LeaderboardStore,
+    PostedAnnouncement,
+    apply_nicknames,
+    chad_winners,
+    chud_winners,
     format_chad,
+    format_chad_winners,
     format_chud,
+    format_chud_winners,
     format_standings,
 )
 
@@ -210,6 +216,56 @@ class LeaderboardStoreTests(unittest.TestCase):
             ("Alice is the CHAD", "Bob is the CHUD"),
         )
 
+    def test_a_posted_day_remembers_who_won(self) -> None:
+        self.assertTrue(
+            self.store.mark_posted(
+                chat_id=-100,
+                local_date=DAY,
+                chad_message="Alice is the CHAD",
+                chud_message="Bob is the CHUD",
+                chad_winners=[(5, "Alice")],
+                chud_winners=[(6, "Bob")],
+            )
+        )
+
+        announcements = self.store.posted_announcements(chat_id=-100, local_date=DAY)
+        assert announcements is not None
+        self.assertEqual(
+            announcements[0], PostedAnnouncement("Alice is the CHAD", ((5, "Alice"),))
+        )
+        self.assertEqual(
+            announcements[1], PostedAnnouncement("Bob is the CHUD", ((6, "Bob"),))
+        )
+
+    def test_a_day_posted_without_winners_has_only_its_messages(self) -> None:
+        self.store.mark_posted(
+            chat_id=-100, local_date=DAY, chad_message="Alice is the CHAD"
+        )
+
+        announcements = self.store.posted_announcements(chat_id=-100, local_date=DAY)
+        assert announcements is not None
+        self.assertEqual(
+            announcements,
+            (
+                PostedAnnouncement("Alice is the CHAD", None),
+                PostedAnnouncement(None, None),
+            ),
+        )
+
+    def test_unreadable_winners_fall_back_to_the_message(self) -> None:
+        self.store.mark_posted(
+            chat_id=-100, local_date=DAY, chad_message="Alice is the CHAD"
+        )
+        with sqlite3.connect(self.store.path) as connection:
+            connection.execute(
+                "UPDATE posted_days SET chad_winners = 'not json' WHERE chat_id = -100"
+            )
+
+        announcements = self.store.posted_announcements(chat_id=-100, local_date=DAY)
+        assert announcements is not None
+        self.assertIsNone(announcements[0].winners)
+        self.assertEqual(announcements[0].message, "Alice is the CHAD")
+
     def test_an_old_posted_days_table_is_upgraded(self) -> None:
         path = Path(self.temp_dir.name) / "old-posts.db"
         with sqlite3.connect(path) as connection:
@@ -225,6 +281,45 @@ class LeaderboardStoreTests(unittest.TestCase):
             self.assertEqual(
                 store.posted_messages(chat_id=-100, local_date=DAY), (None, None)
             )
+            self.assertEqual(
+                store.posted_announcements(chat_id=-100, local_date=DAY),
+                (
+                    PostedAnnouncement(None, None),
+                    PostedAnnouncement(None, None),
+                ),
+            )
+
+    def test_a_database_predating_the_winner_columns_is_upgraded(self) -> None:
+        path = Path(self.temp_dir.name) / "old-winners.db"
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                """CREATE TABLE posted_days (
+                    chat_id INTEGER NOT NULL,
+                    local_date TEXT NOT NULL,
+                    chad_message TEXT,
+                    chud_message TEXT,
+                    PRIMARY KEY (chat_id, local_date)
+                ) WITHOUT ROWID"""
+            )
+            connection.execute(
+                "INSERT INTO posted_days VALUES (-100, ?, ?, ?)",
+                (DAY, "Alice is the CHAD", "Bob is the CHUD"),
+            )
+        with LeaderboardStore(path) as store:
+            announcements = store.posted_announcements(chat_id=-100, local_date=DAY)
+            assert announcements is not None
+            self.assertEqual(announcements[0].message, "Alice is the CHAD")
+            self.assertIsNone(announcements[0].winners)
+
+    def test_a_days_players_keep_the_names_they_submitted_under(self) -> None:
+        self.record("Alice", wordle("3/6", 3), user_id=5)
+        self.record("Bob", wordle("4/6", 4), user_id=6)
+
+        self.assertEqual(
+            sorted(self.store.daily_names(chat_id=-100, local_date=DAY)),
+            [(5, "Alice"), (6, "Bob")],
+        )
+        self.assertEqual(self.store.daily_names(chat_id=-200, local_date=DAY), [])
 
     def test_a_day_without_results_is_never_awaiting_a_post(self) -> None:
         self.assertFalse(self.store.is_awaiting_post(chat_id=-100, local_date=DAY))
@@ -256,7 +351,9 @@ class FormatStandingsTests(unittest.TestCase):
             GameStandings(
                 game=name,
                 puzzle_id="42",
-                entries=(Entry(user_id=5, display_name="Alice", score="1", rank_key=1),),
+                entries=(
+                    Entry(user_id=5, display_name="Alice", score="1", rank_key=1),
+                ),
             )
             for name in ("Connections", "Fermi", "Krillion", "Wordle")
         ]
@@ -299,8 +396,12 @@ class FormatChudTests(unittest.TestCase):
             game=game,
             puzzle_id="42",
             entries=tuple(
-                Entry(user_id={"Alice": 5, "Bob": 6, "Cara": 7}[name],
-                      display_name=name, score=str(rank), rank_key=rank)
+                Entry(
+                    user_id={"Alice": 1, "Bob": 2, "Cara": 3}[name],
+                    display_name=name,
+                    score=str(rank),
+                    rank_key=rank,
+                )
                 for rank, name in enumerate(names, start=1)
             ),
         )
@@ -354,6 +455,32 @@ class FormatChudTests(unittest.TestCase):
             "🚽 Ding ding ding! Alice, Bob and Cara are the CHUDs of the day!",
         )
 
+    def test_a_nickname_renames_the_chud(self) -> None:
+        boards = [self.board("Wordle", "Alice", "Bob")]
+
+        self.assertEqual(
+            format_chud(boards, nicknames={2: "Diddy"}),
+            "🚽 Ding ding ding! Diddy is the CHUD of the day!",
+        )
+
+    def test_the_winners_carry_the_ids_they_were_recorded_with(self) -> None:
+        boards = [self.board("Wordle", "Alice", "Bob")]
+
+        self.assertEqual(chad_winners(boards), [(1, "Alice")])
+        self.assertEqual(chud_winners(boards), [(2, "Bob")])
+
+    def test_saved_winners_render_exactly_as_the_standings_do(self) -> None:
+        boards = [
+            self.board("Wordle", "Alice", "Bob", "Cara"),
+            self.board("Fermi", "Bob", "Cara", "Alice"),
+        ]
+
+        self.assertEqual(format_chud_winners(chud_winners(boards)), format_chud(boards))
+        self.assertEqual(
+            format_chad_winners(chad_winners(boards), variation=3),
+            format_chad(boards, variation=3),
+        )
+
 
 class FormatChadTests(unittest.TestCase):
     board = staticmethod(FormatChudTests.board)
@@ -392,6 +519,27 @@ class FormatChadTests(unittest.TestCase):
         self.assertTrue(
             format_chad(boards).startswith(
                 "👑 Ding ding ding! Alice and Bob are the CHADs of the day!\n"
+            )
+        )
+
+    def test_a_nickname_renames_the_chad(self) -> None:
+        boards = [self.board("Wordle", "Alice", "Bob")]
+
+        chad = format_chad(boards, nicknames={1: "Juan"})
+        assert chad is not None
+        self.assertTrue(
+            chad.startswith("👑 Ding ding ding! Juan is the CHAD of the day!\n")
+        )
+
+    def test_a_tie_keeps_both_winners_and_their_nicknames(self) -> None:
+        boards = [self.board("Wordle", "Alice", "Bob")]
+        boards.append(self.board("Fermi", "Bob", "Alice"))
+
+        chad = format_chad(boards, nicknames={1: "Juan", 2: "Diddy"})
+        assert chad is not None
+        self.assertTrue(
+            chad.startswith(
+                "👑 Ding ding ding! Diddy and Juan are the CHADs of the day!\n"
             )
         )
 
@@ -434,6 +582,74 @@ class FormatChadTests(unittest.TestCase):
         self.assertIn("are you guys poly? 👀", plural_lines)
         self.assertNotIn("are you guys poly? 👀", singular_lines)
         self.assertNotIn("we gotta audit this guy. 🔎", plural_lines)
+
+
+class ApplyNicknamesTests(unittest.TestCase):
+    """A day that recorded only its message must still follow nicknames."""
+
+    def test_a_recorded_name_becomes_its_nickname(self) -> None:
+        self.assertEqual(
+            apply_nicknames(
+                "👑 Ding ding ding! Ethan is the CHAD of the day!\nwahoo!",
+                players=[(5, "Ethan"), (6, "Aditya")],
+                nicknames={5: "Big Ethan"},
+            ),
+            "👑 Ding ding ding! Big Ethan is the CHAD of the day!\nwahoo!",
+        )
+
+    def test_a_name_no_nickname_covers_is_left_alone(self) -> None:
+        self.assertEqual(
+            apply_nicknames(
+                "🚽 Ding ding ding! Aditya is the CHUD of the day!",
+                players=[(5, "Ethan"), (6, "Aditya")],
+                nicknames={5: "Big Ethan"},
+            ),
+            "🚽 Ding ding ding! Aditya is the CHUD of the day!",
+        )
+
+    def test_a_name_two_nicknames_share_is_left_alone(self) -> None:
+        # Two players called Bob go by different nicknames, so "Bob" in a
+        # message recorded before the split cannot be attributed to either.
+        self.assertEqual(
+            apply_nicknames(
+                "🚽 Ding ding ding! Bob is the CHUD of the day!",
+                players=[(5, "Bob"), (6, "Bob")],
+                nicknames={5: "Juan", 6: "Diddy"},
+            ),
+            "🚽 Ding ding ding! Bob is the CHUD of the day!",
+        )
+
+    def test_a_shorter_name_does_not_replace_part_of_a_longer_one(self) -> None:
+        self.assertEqual(
+            apply_nicknames(
+                "Ding ding ding! Ann and Anna are the CHUDs of the day!",
+                players=[(5, "Ann"), (6, "Anna")],
+                nicknames={6: "Diddy"},
+            ),
+            "Ding ding ding! Ann and Diddy are the CHUDs of the day!",
+        )
+
+    def test_only_the_line_naming_the_winners_is_rewritten(self) -> None:
+        # A closing line is a joke in its own right, so a name it happens to
+        # mention is left as the joke's author wrote it.
+        self.assertEqual(
+            apply_nicknames(
+                "👑 Ding ding ding! Alice is the CHAD of the day!\nAlice grass! 🌱",
+                players=[(5, "Alice")],
+                nicknames={5: "Juan"},
+            ),
+            "👑 Ding ding ding! Juan is the CHAD of the day!\nAlice grass! 🌱",
+        )
+
+    def test_two_names_are_replaced_longest_first(self) -> None:
+        self.assertEqual(
+            apply_nicknames(
+                "Ding ding ding! Ann and Anna are the CHUDs of the day!",
+                players=[(5, "Ann"), (6, "Anna")],
+                nicknames={5: "Juan", 6: "Diddy"},
+            ),
+            "Ding ding ding! Juan and Diddy are the CHUDs of the day!",
+        )
 
 
 if __name__ == "__main__":

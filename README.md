@@ -36,8 +36,11 @@ Text, media captions, and hidden links are supported; `t.co` links are not resol
 
 ## Nicknames
 
-`SFBOT_NICKNAMES` overrides names in callouts, mentions without a username, and
-standings. Real @usernames still take precedence for mentions.
+Some people go by something other than their Telegram name. `SFBOT_NICKNAMES`
+holds comma-separated `user_id:nickname` pairs and overrides the Telegram name
+everywhere the bot names someone — the `sf` reply's mention, the repeat-poster
+callout, the leaderboard, and the CHAD and CHUD announcements — so Bob who goes
+by Juan gets `/NukeJuan`:
 
 ```dotenv
 SFBOT_NICKNAMES=123456789:Juan,987654321:Nikki
@@ -50,7 +53,13 @@ SFBOT_LOG_LEVEL=DEBUG make run
 # ... Message from user 123456789 (Bob)
 ```
 
-Restart after changing nicknames. They also apply to existing results.
+Anyone without an entry keeps their Telegram name. The bot is restarted for a
+change to take effect. The current nickname also appears for scores submitted
+before the change, and for a CHAD or CHUD announcement repeated after it: the
+winner is stored by user ID, so `/chad` and `/chud` name them the way the bot
+would name them today. A day posted before that was recorded has only the
+message it sent, so the names in it are swapped for nicknames where they still
+belong to one player of that day.
 
 ## Architecture
 
@@ -218,6 +227,19 @@ At 20:00 SGT, members receive a DM listing their outstanding games. Missed
 reminders are dropped after the posting window opens. At or after 21:00 SGT,
 days with results get a board, followed by CHAD and CHUD announcements.
 
+Use `/chad` or `/chud` to repeat that day's announcement after the scheduled
+post. The winners stay the same even if more results arrive later, but they are
+named as they are now: the announcement is re-rendered from the day's saved
+winners, so a nickname added or changed after the post still shows. Only a day
+posted before the winners were saved falls back to the message it sent, with
+its names swapped for nicknames where they still match one player of that day.
+
+Before the result is decided, each command says so. Use `/leaderboard` to ask
+for standings early. These commands reply in the chat where you ask, so a DM
+check stays private and a group check is visible to everyone. Each game heading
+has its own emoji, and the player or players in first place get a 👑. Use
+`/games` in either chat for links to all supported games.
+
 Each game and puzzle number has its own board, ordered best first with ties
 sharing a placement and first place crowned 👑. CHAD has the best total placement
 across boards; CHUD has the worst. Missing a board costs one place beyond last,
@@ -233,7 +255,7 @@ that day, unless overridden by a nickname.
 
 Commands reply where you ask; a DM check stays private. In groups, standings,
 announcements, and submissions are available only in the configured leaderboard
-group. Posted boards and saved announcements do not change with late submissions.
+group. Posted boards and saved winners do not change with late submissions.
 
 ### Finding the group's chat ID
 
