@@ -8,6 +8,7 @@ import sqlite3
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, timedelta
 from itertools import groupby
 from pathlib import Path
 
@@ -40,6 +41,23 @@ class PostedAnnouncement:
 
     message: str | None
     winners: tuple[Winner, ...] | None
+
+
+@dataclass(frozen=True, slots=True)
+class DailyRank:
+    user_id: int
+    display_name: str
+    points: int
+
+
+@dataclass(frozen=True, slots=True)
+class OverallRank:
+    user_id: int
+    display_name: str
+    chads: int
+    chuds: int
+    chad_streak: int
+    chud_streak: int
 
 
 class LeaderboardStore:
@@ -89,6 +107,7 @@ class LeaderboardStore:
                 chud_message TEXT,
                 chad_winners TEXT,
                 chud_winners TEXT,
+                daily_ranking TEXT,
                 PRIMARY KEY (chat_id, local_date)
             ) WITHOUT ROWID
             """
@@ -101,6 +120,7 @@ class LeaderboardStore:
             "chud_message",
             "chad_winners",
             "chud_winners",
+            "daily_ranking",
         ):
             if column not in posted_columns:
                 self._connection.execute(
@@ -296,6 +316,7 @@ class LeaderboardStore:
         chud_message: str | None = None,
         chad_winners: Sequence[Winner] | None = None,
         chud_winners: Sequence[Winner] | None = None,
+        daily_ranking: Sequence[DailyRank] | None = None,
     ) -> bool:
         """Record that a chat's daily post is done, returning False if it already was."""
 
@@ -303,8 +324,8 @@ class LeaderboardStore:
             cursor = self._connection.execute(
                 """INSERT OR IGNORE INTO posted_days
                    (chat_id, local_date, chad_message, chud_message,
-                    chad_winners, chud_winners)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                    chad_winners, chud_winners, daily_ranking)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
                     chat_id,
                     local_date,
@@ -312,6 +333,7 @@ class LeaderboardStore:
                     chud_message,
                     _encode_winners(chad_winners),
                     _encode_winners(chud_winners),
+                    _encode_daily_ranking(daily_ranking),
                 ),
             )
         return cursor.rowcount == 1
@@ -337,6 +359,93 @@ class LeaderboardStore:
         return (
             PostedAnnouncement(message=row[0], winners=_decode_winners(row[2])),
             PostedAnnouncement(message=row[1], winners=_decode_winners(row[3])),
+        )
+
+    def posted_daily_ranking(
+        self, *, chat_id: int, local_date: str
+    ) -> tuple[DailyRank, ...] | None:
+        """Return the ranking frozen when the day was posted, if available."""
+
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT daily_ranking FROM posted_days WHERE chat_id = ? AND local_date = ?",
+                (chat_id, local_date),
+            ).fetchone()
+        return _decode_daily_ranking(row[0]) if row else None
+
+    def title_streaks(
+        self, *, chat_id: int, local_date: str, winners: Sequence[Winner], is_chad: bool
+    ) -> dict[int, int]:
+        """Count consecutive calendar days ending with the given winners today."""
+
+        column = "chad_winners" if is_chad else "chud_winners"
+        streaks = {user_id: 1 for user_id, _ in winners}
+        active = set(streaks)
+        expected = date.fromisoformat(local_date) - timedelta(days=1)
+        with self._lock:
+            rows = self._connection.execute(
+                f"SELECT local_date, {column} FROM posted_days "
+                "WHERE chat_id = ? AND local_date < ? ORDER BY local_date DESC",
+                (chat_id, local_date),
+            )
+            for posted_date, raw_winners in rows:
+                if not active or posted_date != expected.isoformat():
+                    break
+                past_ids = {
+                    user_id for user_id, _ in _decode_winners(raw_winners) or ()
+                }
+                active &= past_ids
+                for user_id in active:
+                    streaks[user_id] += 1
+                expected -= timedelta(days=1)
+        return streaks
+
+    def overall_ranking(
+        self, *, chat_id: int, nicknames: Mapping[int, str] | None = None
+    ) -> list[OverallRank]:
+        """Count saved titles and active streaks through the latest posted day."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT local_date, chad_winners, chud_winners FROM posted_days "
+                "WHERE chat_id = ? ORDER BY local_date",
+                (chat_id,),
+            ).fetchall()
+            names_rows = self._connection.execute(
+                "SELECT user_id, display_name FROM game_results "
+                "WHERE chat_id = ? ORDER BY submitted_at, local_date",
+                (chat_id,),
+            ).fetchall()
+        names = {int(user_id): str(name) for user_id, name in names_rows}
+        counts: dict[int, list[int]] = {user_id: [0, 0] for user_id in names}
+        streaks: dict[int, list[int]] = {}
+        previous: date | None = None
+        for day, raw_chads, raw_chuds in rows:
+            current = date.fromisoformat(day)
+            consecutive = (
+                previous is not None and current - previous == timedelta(days=1)
+            )
+            today_streaks: dict[int, list[int]] = {}
+            for index, raw in enumerate((raw_chads, raw_chuds)):
+                winners = _decode_winners(raw) or ()
+                for user_id, name in winners:
+                    names.setdefault(user_id, name)
+                    counts.setdefault(user_id, [0, 0])[index] += 1
+                    yesterday = streaks.get(user_id, [0, 0])[index] if consecutive else 0
+                    today_streaks.setdefault(user_id, [0, 0])[index] = yesterday + 1
+            streaks = today_streaks
+            previous = current
+        current_names = nicknames or {}
+        ranking = [
+            OverallRank(
+                user_id, current_names.get(user_id, names.get(user_id, str(user_id))),
+                titles[0], titles[1], *streaks.get(user_id, [0, 0]),
+            )
+            for user_id, titles in counts.items()
+        ]
+        return sorted(
+            ranking,
+            key=lambda rank: (-rank.chads, rank.chuds, rank.display_name, rank.user_id),
         )
 
     def posted_messages(
@@ -638,6 +747,108 @@ def _decode_winners(raw: object) -> tuple[Winner, ...] | None:
         except (TypeError, ValueError):
             return None
     return tuple(winners) or None
+
+
+def _encode_daily_ranking(ranking: Sequence[DailyRank] | None) -> str | None:
+    if ranking is None:
+        return None
+    return json.dumps(
+        [[rank.user_id, rank.display_name, rank.points] for rank in ranking],
+        ensure_ascii=False,
+    )
+
+
+def _decode_daily_ranking(raw: object) -> tuple[DailyRank, ...] | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, list):
+            return None
+        return tuple(
+            DailyRank(int(user_id), str(name), int(points))
+            for user_id, name, points in data
+        )
+    except (ValueError, TypeError):
+        return None
+
+
+def daily_ranking(standings: Sequence[GameStandings]) -> list[DailyRank]:
+    """Rank all participants by the placement total used for CHAD and CHUD."""
+
+    totals = _total_placings(standings)
+    names = {
+        entry.user_id: entry.display_name
+        for board in standings
+        for entry in board.entries
+    }
+    return sorted(
+        (
+            DailyRank(user_id, names[user_id], points)
+            for user_id, points in totals.items()
+        ),
+        key=lambda rank: (rank.points, rank.display_name, rank.user_id),
+    )
+
+
+def format_daily_ranking(
+    ranking: Sequence[DailyRank],
+    *,
+    local_date: str,
+    chads: Sequence[Winner],
+    chuds: Sequence[Winner],
+    nicknames: Mapping[int, str] | None = None,
+) -> str:
+    """Show the final placing score, marking everyone tied for either title."""
+
+    lines = [
+        f"Final rankings - {local_date}",
+        "Lower is better: sum of game placements; a missed game scores one past last place.",
+    ]
+    chad_ids = {user_id for user_id, _ in chads}
+    chud_ids = {user_id for user_id, _ in chuds}
+    names = nicknames or {}
+    place = 0
+    previous: int | None = None
+    for index, rank in enumerate(ranking, start=1):
+        if rank.points != previous:
+            place = index
+            previous = rank.points
+        badges = ("👑 " if rank.user_id in chad_ids else "") + (
+            "🚽 " if rank.user_id in chud_ids else ""
+        )
+        unit = "point" if rank.points == 1 else "points"
+        lines.append(
+            f"{place}. {badges}{names.get(rank.user_id, rank.display_name)} "
+            f"— {rank.points} {unit}"
+        )
+    return "\n".join(lines)
+
+
+def format_overall_ranking(ranking: Sequence[OverallRank]) -> str:
+    if not ranking:
+        return "No CHAD or CHUD titles have been recorded yet."
+    lines = [
+        "Overall leaderboard",
+        "👑 CHADs  🚽 CHUDs  🔥 CHAD streak  💩 CHUD streak",
+    ]
+    place = 0
+    previous: tuple[int, int] | None = None
+    for index, rank in enumerate(ranking, start=1):
+        score = (rank.chads, rank.chuds)
+        if score != previous:
+            place = index
+            previous = score
+        parts = [
+            f"{place}. {rank.display_name} — 👑 {rank.chads}",
+            f"🚽 {rank.chuds}",
+        ]
+        if rank.chad_streak > 0:
+            parts.append(f"🔥 {rank.chad_streak}")
+        if rank.chud_streak > 0:
+            parts.append(f"💩 {rank.chud_streak}")
+        lines.append("  ".join(parts))
+    return "\n".join(lines)
 
 
 def format_standings(standings: list[GameStandings], *, local_date: str) -> str:

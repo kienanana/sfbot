@@ -528,7 +528,7 @@ class HandleMessageTests(unittest.TestCase):
             post_minute=21 * 60,
             now=2_000_035_800,
         )
-        chad, chud = self.client.sent[1:]
+        chad, chud = self.client.sent[1:3]
         self.assertIn("Alice is the CHAD of the day!", chad[1])
         self.assertEqual(chud[1], "🚽 Ding ding ding! Bob is the CHUD of the day!")
         self.client.sent.clear()
@@ -552,6 +552,75 @@ class HandleMessageTests(unittest.TestCase):
         ask("/chud", chat_id=OTHER_GROUP, user_id=99)
         self.assertEqual(len(self.client.sent), 1)
         self.assertIn("roster", self.client.sent[0][1])
+
+    def test_daily_and_overall_commands_show_saved_titles_in_dm_and_group(self) -> None:
+        self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
+        self.dm("Wordle 1,234 5/6", user_id=6, name="Bob", message_id=8)
+        self.client.sent.clear()
+
+        def ask(command: str, chat_id: int = DM, user_id: int = 5) -> None:
+            self.handle({
+                "chat": {"id": chat_id, "type": "private" if chat_id == DM else "supergroup"},
+                "message_id": 30, "date": 2_000_035_800,
+                "from": {"id": user_id, "first_name": "Alice"},
+                "text": command, "entities": command_entity(command),
+            }, nicknames={5: "Juan"})
+
+        ask("/daily")
+        ask("/overall")
+        self.assertEqual(self.client.sent[0], (DM, "Final rankings haven't been posted yet."))
+        self.assertIn("Juan — 👑 0  🚽 0", self.client.sent[1][1])
+        self.client.sent.clear()
+        post_due_leaderboard(
+            self.client,  # type: ignore[arg-type]
+            self.store, board_chat_id=GROUP, utc_offset_minutes=SGT_OFFSET,
+            post_minute=21 * 60, now=2_000_035_800,
+        )
+        saved_daily = self.client.sent[-1][1]
+        self.assertIn("1. 👑 Alice — 1 point", saved_daily)
+        self.assertIn("2. 🚽 Bob — 2 points", saved_daily)
+        self.client.sent.clear()
+
+        # A late better score cannot change the posted ranking or title totals.
+        self.handle({
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 31, "date": 2_000_035_900,
+            "from": {"id": 7, "first_name": "Cara"},
+            "text": "Wordle 1,234 1/6",
+        })
+        ask("/daily", chat_id=GROUP)
+        ask("/overall")
+        self.assertIn("1. 👑 Juan — 1 point", self.client.sent[0][1])
+        self.assertNotIn("Cara", self.client.sent[0][1])
+        self.assertIn("Juan — 👑 1", self.client.sent[1][1])
+        self.assertIn("Cara — 👑 0  🚽 0", self.client.sent[1][1])
+        self.client.sent.clear()
+        ask("/daily", user_id=99)
+        ask("/overall", chat_id=OTHER_GROUP)
+        self.assertEqual(len(self.client.sent), 1)
+        self.assertIn("roster", self.client.sent[0][1])
+
+    def test_chad_command_repeats_the_streak_with_a_current_nickname(self) -> None:
+        self.store.mark_posted(
+            chat_id=GROUP, local_date="2033-05-17",
+            chad_winners=[(5, "Alice")],
+        )
+        self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
+        self.dm("Wordle 1,234 5/6", user_id=6, name="Bob", message_id=8)
+        post_due_leaderboard(
+            self.client,  # type: ignore[arg-type]
+            self.store, board_chat_id=GROUP, utc_offset_minutes=SGT_OFFSET,
+            post_minute=21 * 60, now=2_000_035_800,
+        )
+        self.client.sent.clear()
+        command = "/chad"
+        self.handle({
+            "chat": {"id": DM, "type": "private"},
+            "message_id": 30, "date": 2_000_035_900,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": command, "entities": command_entity(command),
+        }, nicknames={5: "Juan"})
+        self.assertIn("🔥 Juan: 2-day CHAD streak!", self.client.sent[0][1])
 
     def test_a_nickname_change_reaches_the_chad_and_chud_commands(self) -> None:
         self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
@@ -1146,10 +1215,12 @@ class PostDueLeaderboardTests(unittest.TestCase):
         self.post(2_000_035_800)
         self.post(2_000_036_400)
 
-        # The board, CHAD, and CHUD are sent once in that order.
-        self.assertEqual(len(self.client.sent), 3)
+        # The game boards, titles, and final ranking are sent once in that order.
+        self.assertEqual(len(self.client.sent), 4)
         self.assertEqual(self.client.sent[0][0], GROUP)
         self.assertIn("Wordle 1234", self.client.sent[0][1])
+        self.assertIn("Final rankings", self.client.sent[3][1])
+        self.assertIn("👑 🚽 Alice", self.client.sent[3][1])
 
     def test_the_daily_post_crowns_a_chud(self) -> None:
         for user_id, name, text in (
@@ -1174,6 +1245,27 @@ class PostDueLeaderboardTests(unittest.TestCase):
             (GROUP, "🚽 Ding ding ding! Bob is the CHUD of the day!"),
         )
         self.assertIn("Alice is the CHAD of the day!", self.client.sent[1][1])
+        self.assertNotIn("🔥", self.client.sent[1][1])
+        self.assertNotIn("💩", self.client.sent[2][1])
+
+    def test_chad_and_chud_posts_acknowledge_consecutive_titles(self) -> None:
+        self.store.mark_posted(
+            chat_id=GROUP, local_date="2033-05-17",
+            chad_winners=[(5, "Alice")], chud_winners=[(6, "Bob")],
+        )
+        for user_id, name, score in ((5, "Alice", "2/6"), (6, "Bob", "5/6")):
+            result = parse_result(f"Wordle 1,234 {score}")
+            assert result is not None
+            self.store.record(
+                chat_id=GROUP, local_date="2033-05-18", user_id=user_id,
+                display_name=name, result=result, submitted_at=2_000_000_000 + user_id,
+            )
+        self.post(2_000_035_800, nicknames={5: "Juan"})
+        self.assertIn("🔥 Juan: 2-day CHAD streak!", self.client.sent[1][1])
+        self.assertIn("💩 Bob: 2-day CHUD streak!", self.client.sent[2][1])
+        self.assertEqual(
+            self.store.overall_ranking(chat_id=GROUP)[0].chad_streak, 2
+        )
 
     def test_nothing_is_posted_when_no_results_exist(self) -> None:
         self.post(2_000_035_800)

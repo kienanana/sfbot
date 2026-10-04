@@ -7,15 +7,19 @@ from sfbot.games import ParsedResult
 from sfbot.leaderboard import (
     Entry,
     GameStandings,
+    DailyRank,
     LeaderboardStore,
     PostedAnnouncement,
     apply_nicknames,
     chad_winners,
     chud_winners,
+    daily_ranking,
     format_chad,
     format_chad_winners,
     format_chud,
     format_chud_winners,
+    format_daily_ranking,
+    format_overall_ranking,
     format_standings,
 )
 
@@ -71,6 +75,73 @@ class LeaderboardStoreTests(unittest.TestCase):
         self.assertEqual(_total_placings(boards), {5: 5, 6: 4})
         self.assertIn("Alex is the CHAD", format_chad(boards))
         self.assertIn("Alex is the CHUD", format_chud(boards))
+
+    def test_daily_ranking_uses_title_points_and_marks_ties(self) -> None:
+        self.record("Alice", wordle("1/6", 1), user_id=5)
+        self.record("Bob", wordle("2/6", 2), user_id=6)
+        self.record("Cara", wordle("2/6", 2), user_id=7)
+        self.record("Alice", ParsedResult("Fermi", "42", "1", 1), user_id=5)
+        boards = self.store.standings(chat_id=-100, local_date=DAY)
+        ranks = daily_ranking(boards)
+        self.assertEqual([(rank.user_id, rank.points) for rank in ranks],
+                         [(5, 2), (6, 4), (7, 4)])
+        shown = format_daily_ranking(
+            ranks, local_date=DAY, chads=chad_winners(boards),
+            chuds=chud_winners(boards), nicknames={5: "Juan"},
+        )
+        self.assertIn("1. 👑 Juan — 2 points", shown)
+        self.assertIn("2. 🚽 Bob — 4 points", shown)
+        self.assertIn("2. 🚽 Cara — 4 points", shown)
+
+    def test_posted_ranking_survives_reopen_and_late_results(self) -> None:
+        self.store.mark_posted(
+            chat_id=-100, local_date=DAY,
+            chad_winners=[(5, "Alice")], chud_winners=[(6, "Bob")],
+            daily_ranking=[DailyRank(5, "Alice", 1), DailyRank(6, "Bob", 2)],
+        )
+        self.record("Cara", wordle("1/6", 1), user_id=7)
+        self.store.close()
+        self.store = LeaderboardStore(Path(self.temp_dir.name) / "sfbot.db")
+        self.assertEqual(
+            self.store.posted_daily_ranking(chat_id=-100, local_date=DAY),
+            (DailyRank(5, "Alice", 1), DailyRank(6, "Bob", 2)),
+        )
+
+    def test_overall_counts_titles_and_calendar_streaks_by_user_id(self) -> None:
+        self.store.mark_posted(
+            chat_id=-100, local_date="2033-05-16",
+            chad_winners=[(5, "Alex"), (6, "Alex")], chud_winners=[(7, "Cara")],
+        )
+        self.store.mark_posted(
+            chat_id=-100, local_date="2033-05-17",
+            chad_winners=[(5, "Alex")], chud_winners=[(7, "Cara")],
+        )
+        self.store.mark_posted(
+            chat_id=-100, local_date=DAY,
+            chad_winners=[(5, "Alex")], chud_winners=[(6, "Alex")],
+        )
+        ranks = self.store.overall_ranking(chat_id=-100, nicknames={5: "Juan"})
+        self.assertEqual(
+            [(r.user_id, r.chads, r.chuds, r.chad_streak, r.chud_streak) for r in ranks],
+            [(5, 3, 0, 3, 0), (6, 1, 1, 0, 1), (7, 0, 2, 0, 0)],
+        )
+        shown = format_overall_ranking(ranks)
+        self.assertIn("Juan — 👑 3  🚽 0  🔥 3", shown)
+        self.assertNotIn("Juan — 👑 3  🚽 0  🔥 3  💩", shown)
+        self.assertIn("Alex — 👑 1  🚽 1  💩 1", shown)
+        self.assertIn("Cara — 👑 0  🚽 2", shown)
+        self.assertNotIn("Cara — 👑 0  🚽 2  🔥", shown)
+        self.assertEqual(
+            self.store.title_streaks(
+                chat_id=-100, local_date=DAY, winners=[(5, "Alex"), (6, "Alex")],
+                is_chad=True,
+            ),
+            {5: 3, 6: 1},
+        )
+        self.store.mark_posted(
+            chat_id=-100, local_date="2033-05-20", chad_winners=[(5, "Alex")]
+        )
+        self.assertEqual(self.store.overall_ranking(chat_id=-100)[0].chad_streak, 1)
 
     def test_a_name_change_does_not_split_a_player(self) -> None:
         self.record("Alice", wordle("1/6", 1), user_id=5, submitted_at=1)
