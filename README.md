@@ -76,11 +76,11 @@ flowchart TD
     Z2 --> C
     Z -->|no| C
 
-    C{"/games, /leaderboard,<br/>/chad, or /chud?"}
+    C{"/games, /leaderboard,<br/>/chad, /chud, /daily,<br/>or /overall?"}
     C -->|/games| D4["send links to all supported games"]
     C -->|/leaderboard| D{"where asked?"}
-    C -->|/chad or /chud| D
-    D -->|board group or member DM| D3["read standings or posted announcement"]
+    C -->|/chad, /chud, /daily, or /overall| D
+    D -->|board group or member DM| D3["read standings, titles, or rankings"]
     D -->|unknown DM| D2["ask them to say<br/>something in the group"]
     D -->|other group| M
     D3 --> E["answer in the chat that asked<br/>a DM check stays private"]
@@ -104,7 +104,7 @@ flowchart TD
 
     A --> R["after each batch:<br/>send_due_reminders,<br/>post_due_leaderboard"]
     R --> S{"past 21:00 SGT<br/>and not posted yet?"}
-    S -->|yes| T["post boards, CHAD, then CHUD<br/>to the group"]
+    S -->|yes| T["post boards, CHAD, CHUD,<br/>then final rankings to the group"]
     R --> U{"in the hour before,<br/>and not reminded yet?"}
     U -->|yes| V["DM each member<br/>the games they still owe"]
 ```
@@ -225,7 +225,9 @@ the new day; the default day boundary is UTC+8.
 
 At 20:00 SGT, members receive a DM listing their outstanding games. Missed
 reminders are dropped after the posting window opens. At or after 21:00 SGT,
-days with results get a board, followed by CHAD and CHUD announcements.
+days with results get game boards, CHAD and CHUD announcements, then final
+rankings showing every player's placement score. Consecutive calendar-day title
+streaks of two or more appear in the CHAD and CHUD announcements.
 
 Use `/chad` or `/chud` to repeat that day's announcement after the scheduled
 post. The winners stay the same even if more results arrive later, but they are
@@ -234,17 +236,19 @@ winners, so a nickname added or changed after the post still shows. Only a day
 posted before the winners were saved falls back to the message it sent, with
 its names swapped for nicknames where they still match one player of that day.
 
-Before the result is decided, each command says so. Use `/leaderboard` to ask
-for standings early. These commands reply in the chat where you ask, so a DM
-check stays private and a group check is visible to everyone. Each game heading
+Before the result is decided, `/chad`, `/chud`, and `/daily` say so. Use
+`/leaderboard` to ask for game standings early. These commands reply in the chat
+where you ask, so a DM check stays private and a group check is visible to
+everyone. Each game heading
 has its own emoji, and the player or players in first place get a 👑. Use
 `/games` in either chat for links to all supported games.
 
 Each game and puzzle number has its own board, ordered best first with ties
 sharing a placement and first place crowned 👑. CHAD has the best total placement
-across boards; CHUD has the worst. Missing a board costs one place beyond last,
-and ties share the title. Players are identified by user ID, so matching names
-never combine scores. Display names come from each player's latest submission
+across boards; CHUD has the worst. The `/daily` ranking shows this sum for every
+player, with lower scores better. Missing a board costs one place beyond last,
+and ties share the placement and title. Players are identified by user ID, so
+matching names never combine scores. Display names come from each player's latest submission
 that day, unless overridden by a nickname.
 
 | Command | Response |
@@ -252,10 +256,17 @@ that day, unless overridden by a nickname.
 | `/games` | Links to all supported games |
 | `/leaderboard` | Current standings, including results submitted after the daily post |
 | `/chad`, `/chud` | The saved announcement for today, or a note that it is not decided yet |
+| `/daily` | Today's saved final ranking and placement scores after the daily post |
+| `/overall` | Each participant's total CHADs and CHUDs, plus 🔥 CHAD or 💩 CHUD streaks only while active |
 
 Commands reply where you ask; a DM check stays private. In groups, standings,
 announcements, and submissions are available only in the configured leaderboard
-group. Posted boards and saved winners do not change with late submissions.
+group. Posted final rankings and saved winners do not change with late submissions.
+The overall leaderboard includes participants with zero titles and updates their
+names from the latest submission or configured nickname. Title totals use saved
+winner IDs; older posted days without saved IDs cannot contribute to those
+totals. `/daily` cannot reconstruct a final ranking for a day posted before
+ranking snapshots were saved. A gap in posted calendar days ends a streak.
 
 ### Finding the group's chat ID
 

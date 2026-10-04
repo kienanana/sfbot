@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.request
 import zlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
@@ -20,13 +20,17 @@ from .leaderboard import (
     GameStandings,
     LeaderboardStore,
     PostedAnnouncement,
+    Winner,
     apply_nicknames,
     chad_winners,
     chud_winners,
+    daily_ranking,
     format_chad,
     format_chad_winners,
     format_chud,
     format_chud_winners,
+    format_daily_ranking,
+    format_overall_ranking,
     format_standings,
 )
 from .links import extract_tweet_ids
@@ -38,6 +42,8 @@ _LEADERBOARD_COMMAND = "/leaderboard"
 _GAMES_COMMAND = "/games"
 _CHAD_COMMAND = "/chad"
 _CHUD_COMMAND = "/chud"
+_DAILY_COMMAND = "/daily"
+_OVERALL_COMMAND = "/overall"
 _ACKNOWLEDGEMENT = "\N{THUMBS UP SIGN}"
 _UNKNOWN_SENDER = (
     "I don't have you on the group roster yet. Say anything in the group chat,"
@@ -363,12 +369,22 @@ def _render_announcement(
 
     if announcement.winners is not None:
         if is_chad:
-            return format_chad_winners(
+            rendered = format_chad_winners(
                 announcement.winners,
                 variation=_chad_variation(board_chat_id, day),
                 nicknames=nicknames,
             )
-        return format_chud_winners(announcement.winners, nicknames=nicknames)
+        else:
+            rendered = format_chud_winners(announcement.winners, nicknames=nicknames)
+        return _with_streaks(
+            rendered,
+            store=store,
+            board_chat_id=board_chat_id,
+            day=day,
+            winners=announcement.winners,
+            is_chad=is_chad,
+            nicknames=nicknames,
+        )
 
     if announcement.message is not None:
         return apply_nicknames(
@@ -385,6 +401,30 @@ def _render_announcement(
     if is_chad:
         return format_chad(standings, variation=_chad_variation(board_chat_id, day))
     return format_chud(standings)
+
+
+def _with_streaks(
+    message: str | None,
+    *,
+    store: LeaderboardStore,
+    board_chat_id: int,
+    day: str,
+    winners: Sequence[Winner],
+    is_chad: bool,
+    nicknames: Mapping[int, str],
+) -> str | None:
+    if message is None:
+        return None
+    streaks = store.title_streaks(
+        chat_id=board_chat_id, local_date=day, winners=winners, is_chad=is_chad
+    )
+    emoji, title = ("🔥", "CHAD") if is_chad else ("💩", "CHUD")
+    lines = [
+        f"{emoji} {nicknames.get(user_id, name)}: {length}-day {title} streak!"
+        for user_id, name in winners
+        if (length := streaks[user_id]) > 1
+    ]
+    return message + ("\n" + "\n".join(lines) if lines else "")
 
 
 def handle_message(
@@ -426,7 +466,13 @@ def handle_message(
         client.send_message(chat_id=chat_id, text=text, entities=entities)
         return
 
-    if command in (_LEADERBOARD_COMMAND, _CHAD_COMMAND, _CHUD_COMMAND):
+    if command in (
+        _LEADERBOARD_COMMAND,
+        _CHAD_COMMAND,
+        _CHUD_COMMAND,
+        _DAILY_COMMAND,
+        _OVERALL_COMMAND,
+    ):
         if board_chat_id is None:
             LOG.warning(
                 "Ignoring %s: set SFBOT_LEADERBOARD_CHAT_ID to the group's"
@@ -455,6 +501,35 @@ def handle_message(
                 day=day,
                 nicknames=nicknames,
             )
+            return
+
+        if command == _OVERALL_COMMAND:
+            client.send_message(
+                chat_id=chat_id,
+                text=format_overall_ranking(
+                    store.overall_ranking(chat_id=board_chat_id, nicknames=nicknames)
+                ),
+            )
+            return
+
+        if command == _DAILY_COMMAND:
+            ranking = store.posted_daily_ranking(chat_id=board_chat_id, local_date=day)
+            posted = store.posted_announcements(chat_id=board_chat_id, local_date=day)
+            if ranking is None or posted is None:
+                text = (
+                    "Final rankings haven't been posted yet."
+                    if posted is None
+                    else "Final rankings weren't saved for this day."
+                )
+            else:
+                text = format_daily_ranking(
+                    ranking,
+                    local_date=day,
+                    chads=posted[0].winners or (),
+                    chuds=posted[1].winners or (),
+                    nicknames=nicknames,
+                )
+            client.send_message(chat_id=chat_id, text=text)
             return
 
         posted = store.posted_announcements(chat_id=board_chat_id, local_date=day)
@@ -590,10 +665,35 @@ def post_due_leaderboard(
         chads, variation=_chad_variation(board_chat_id, day), nicknames=nicknames
     )
     chud = format_chud_winners(chuds, nicknames=nicknames)
+    chad = _with_streaks(
+        chad,
+        store=store,
+        board_chat_id=board_chat_id,
+        day=day,
+        winners=chads,
+        is_chad=True,
+        nicknames=nicknames,
+    )
+    chud = _with_streaks(
+        chud,
+        store=store,
+        board_chat_id=board_chat_id,
+        day=day,
+        winners=chuds,
+        is_chad=False,
+        nicknames=nicknames,
+    )
     if chad is not None:
         client.send_message(chat_id=board_chat_id, text=chad)
     if chud is not None:
         client.send_message(chat_id=board_chat_id, text=chud)
+    ranks = daily_ranking(recorded)
+    client.send_message(
+        chat_id=board_chat_id,
+        text=format_daily_ranking(
+            ranks, local_date=day, chads=chads, chuds=chuds, nicknames=nicknames
+        ),
+    )
     store.mark_posted(
         chat_id=board_chat_id,
         local_date=day,
@@ -601,6 +701,7 @@ def post_due_leaderboard(
         chud_message=chud,
         chad_winners=chads if chad is not None else None,
         chud_winners=chuds if chud is not None else None,
+        daily_ranking=ranks,
     )
     LOG.info("Posted the %s leaderboard to chat %s", day, board_chat_id)
 
