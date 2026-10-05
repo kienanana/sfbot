@@ -13,6 +13,13 @@ def local_date(epoch_seconds: int, *, utc_offset_minutes: int) -> str:
     return _local_datetime(epoch_seconds, utc_offset_minutes).strftime("%Y-%m-%d")
 
 
+def local_minutes(epoch_seconds: int, *, utc_offset_minutes: int) -> int:
+    """Return minutes past local midnight for an epoch timestamp."""
+
+    moment = _local_datetime(epoch_seconds, utc_offset_minutes)
+    return moment.hour * 60 + moment.minute
+
+
 def due_post_date(now: int, *, utc_offset_minutes: int, post_minute: int) -> str:
     """Return the latest local date whose posting window has already opened.
 

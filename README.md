@@ -223,7 +223,9 @@ The first result per person, game, and local day is final. Group submissions
 also count and get a 👍 reaction. Results sent after local midnight count toward
 the new day; the default day boundary is UTC+8.
 
-At 20:00 SGT, members receive a DM listing their outstanding games. Missed
+At 12:00 SGT, when Krillion and Fermi release, the bot posts to the group
+who still owes which games. At 20:00 SGT, members receive a DM listing their
+outstanding games. Missed
 reminders are dropped after the posting window opens. At or after 21:00 SGT,
 days with results get game boards, CHAD and CHUD announcements, then final
 rankings showing every player's placement score. Consecutive calendar-day title

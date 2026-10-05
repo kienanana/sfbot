@@ -145,20 +145,53 @@ class LeaderboardStore:
             ) WITHOUT ROWID
             """
         )
+        member_columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(group_members)")
+        }
+        if "display_name" not in member_columns:
+            self._connection.execute(
+                "ALTER TABLE group_members ADD COLUMN display_name TEXT"
+            )
         self._connection.commit()
 
-    def remember_member(self, *, chat_id: int, user_id: int, seen_at: int) -> None:
+    def remember_member(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        seen_at: int,
+        display_name: str | None = None,
+    ) -> None:
         """Record that a user was seen in the group, which lets them submit by DM."""
 
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO group_members (chat_id, user_id, seen_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT (chat_id, user_id) DO UPDATE SET seen_at = excluded.seen_at
+                INSERT INTO group_members (chat_id, user_id, seen_at, display_name)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                    seen_at = excluded.seen_at,
+                    display_name = COALESCE(excluded.display_name, display_name)
                 """,
-                (chat_id, user_id, seen_at),
+                (chat_id, user_id, seen_at, display_name),
             )
+
+    def member_names(self, *, chat_id: int) -> dict[int, str]:
+        """Return each member's latest known name, from their messages or results."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT m.user_id, COALESCE(m.display_name, (
+                    SELECT r.display_name FROM game_results r
+                    WHERE r.chat_id = m.chat_id AND r.user_id = m.user_id
+                    ORDER BY r.submitted_at DESC LIMIT 1
+                ))
+                FROM group_members m WHERE m.chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchall()
+        return {int(user_id): str(name) for user_id, name in rows if name}
 
     def is_member(self, *, chat_id: int, user_id: int) -> bool:
         """Return whether a user has ever been seen in the group."""

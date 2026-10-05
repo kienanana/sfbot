@@ -12,6 +12,7 @@ from sfbot.telegram import (
     handle_message,
     post_due_leaderboard,
     send_due_reminders,
+    send_midday_reminder,
     run_polling,
 )
 
@@ -1176,6 +1177,127 @@ class SendDueRemindersTests(unittest.TestCase):
         self.assertFalse(
             self.store.is_awaiting_reminder(chat_id=GROUP, local_date="2033-05-18")
         )
+
+
+class SendMiddayReminderTests(unittest.TestCase):
+    NOON = 2_000_001_600  # 2033-05-18 12:00 SGT
+    EVENING = 2_000_030_400  # 2033-05-18 20:00 SGT
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.store = LeaderboardStore(Path(self.temp_dir.name) / "sfbot.db")
+        self.client = FakeTelegramClient()
+        for user_id, name in ((5, "alice"), (6, "Bob")):
+            self.store.remember_member(
+                chat_id=GROUP, user_id=user_id, seen_at=1_999_000_000, display_name=name
+            )
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.temp_dir.cleanup()
+
+    def remind(self, now: int, *, nicknames: dict[int, str] | None = None) -> None:
+        send_midday_reminder(
+            self.client,  # type: ignore[arg-type]
+            self.store,
+            board_chat_id=GROUP,
+            utc_offset_minutes=SGT_OFFSET,
+            post_minute=21 * 60,
+            now=now,
+            nicknames={} if nicknames is None else nicknames,
+        )
+
+    def record(self, text: str, *, user_id: int, name: str) -> None:
+        result = parse_result(text)
+        assert result is not None
+        self.store.record(
+            chat_id=GROUP,
+            local_date="2033-05-18",
+            user_id=user_id,
+            display_name=name,
+            result=result,
+            submitted_at=2_000_000_000,
+        )
+
+    def test_the_group_is_told_who_still_owes_what(self) -> None:
+        self.record("Wordle 1,234 3/6", user_id=5, name="alice")
+
+        self.remind(self.NOON)
+
+        self.assertEqual(
+            self.client.sent,
+            [
+                (
+                    GROUP,
+                    "Krillion and Fermi are live!\nStill to play:\n"
+                    "alice: Krillion, Fermi, Connections\n"
+                    "Bob: Wordle, Krillion, Fermi, Connections",
+                )
+            ],
+        )
+
+    def test_someone_with_nothing_left_is_left_off(self) -> None:
+        for text in (
+            "Wordle 1,234 3/6",
+            "Krillion #7\n1,200",
+            "Fermi 42\n1.0× score",
+            "Connections\nPuzzle #99\n🟨🟨🟨🟨",
+        ):
+            self.record(text, user_id=5, name="alice")
+
+        self.remind(self.NOON)
+
+        self.assertEqual(len(self.client.sent), 1)
+        self.assertNotIn("alice", self.client.sent[0][1])
+
+    def test_a_nickname_replaces_the_telegram_name(self) -> None:
+        self.remind(self.NOON, nicknames={5: "Juan"})
+        self.assertIn("Juan: Wordle", self.client.sent[0][1])
+
+    def test_a_member_never_seen_speaking_falls_back_to_their_result_name(self) -> None:
+        self.store.remember_member(chat_id=GROUP, user_id=7, seen_at=1_999_000_000)
+        self.store.remember_member(chat_id=GROUP, user_id=8, seen_at=1_999_000_000)
+        self.record("Wordle 1,234 3/6", user_id=7, name="Carol")
+
+        self.remind(self.NOON)
+
+        text = self.client.sent[0][1]
+        self.assertIn("Carol: Krillion", text)
+        self.assertIn("8: Wordle", text)
+
+    def test_only_sent_between_noon_and_the_evening_reminders(self) -> None:
+        self.remind(self.NOON - 60)
+        self.remind(self.EVENING)
+        self.assertEqual(self.client.sent, [])
+
+    def test_sent_once_a_day_and_independent_of_the_evening_round(self) -> None:
+        self.remind(self.NOON)
+        self.remind(self.NOON + 600)
+        self.assertEqual(len(self.client.sent), 1)
+
+        self.client.sent.clear()
+        send_due_reminders(
+            self.client,  # type: ignore[arg-type]
+            self.store,
+            board_chat_id=GROUP,
+            utc_offset_minutes=SGT_OFFSET,
+            post_minute=21 * 60,
+            now=self.EVENING,
+        )
+        self.assertEqual([chat_id for chat_id, _ in self.client.sent], [5, 6])
+
+    def test_a_failed_send_is_retried(self) -> None:
+        class Failing(FakeTelegramClient):
+            def send_message(self, **_: object) -> None:
+                raise TelegramAPIError(500, "down")
+
+        self.client = Failing()
+        with self.assertRaises(TelegramAPIError):
+            self.remind(self.NOON)
+
+        self.client = FakeTelegramClient()
+        self.remind(self.NOON + 30)
+        self.assertEqual(len(self.client.sent), 1)
 
 
 class PostDueLeaderboardTests(unittest.TestCase):

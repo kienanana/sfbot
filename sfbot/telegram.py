@@ -34,7 +34,13 @@ from .leaderboard import (
     format_standings,
 )
 from .links import extract_tweet_ids
-from .times import due_post_date, due_reminder_date, local_date
+from .times import (
+    REMINDER_LEAD_MINUTES,
+    due_post_date,
+    due_reminder_date,
+    local_date,
+    local_minutes,
+)
 
 LOG = logging.getLogger(__name__)
 
@@ -42,6 +48,7 @@ _LEADERBOARD_COMMAND = "/leaderboard"
 _GAMES_COMMAND = "/games"
 _CHAD_COMMAND = "/chad"
 _CHUD_COMMAND = "/chud"
+_MIDDAY_MINUTE = 12 * 60  # Krillion and Fermi release at noon SGT.
 _DAILY_COMMAND = "/daily"
 _OVERALL_COMMAND = "/overall"
 _ACKNOWLEDGEMENT = "\N{THUMBS UP SIGN}"
@@ -458,7 +465,14 @@ def handle_message(
     # direct message be trusted. Group Privacy is off, so ordinary chatter counts
     # and nobody has to post a result in the group to get on the roster.
     if is_board_group and sender is not None:
-        store.remember_member(chat_id=board_chat_id, user_id=sender[0], seen_at=seen_at)
+        # The Telegram name, not the nickname, so a nickname change applies later.
+        telegram_sender = _sender(message, _NO_NICKNAMES)
+        store.remember_member(
+            chat_id=board_chat_id,
+            user_id=sender[0],
+            seen_at=seen_at,
+            display_name=telegram_sender[1] if telegram_sender else None,
+        )
 
     command = _leading_command(message)
     if command == _GAMES_COMMAND:
@@ -762,6 +776,55 @@ def send_due_reminders(
     LOG.info("Sent the %s reminders for chat %s", day, board_chat_id)
 
 
+def send_midday_reminder(
+    client: TelegramClient,
+    store: LeaderboardStore,
+    *,
+    board_chat_id: int,
+    utc_offset_minutes: int,
+    post_minute: int,
+    now: int | None = None,
+    nicknames: Mapping[int, str] = _NO_NICKNAMES,
+) -> None:
+    """Tell the group Krillion and Fermi are live and who still owes what.
+
+    Sent from noon until the evening DM reminders begin, which cover anything
+    missed after that.
+    """
+
+    moment = int(time.time()) if now is None else now
+    minutes = local_minutes(moment, utc_offset_minutes=utc_offset_minutes)
+    if not _MIDDAY_MINUTE <= minutes < post_minute - REMINDER_LEAD_MINUTES:
+        return
+
+    day = local_date(moment, utc_offset_minutes=utc_offset_minutes)
+    # Shares the reminder markers under a distinct key, so the noon round and
+    # the evening round never block each other.
+    marker = f"{day}:midday"
+    if not store.is_awaiting_reminder(chat_id=board_chat_id, local_date=marker):
+        return
+
+    submitted = store.submitted_games(chat_id=board_chat_id, local_date=day)
+    names = store.member_names(chat_id=board_chat_id)
+    owed: list[tuple[str, list[str]]] = []
+    for user_id in store.members(chat_id=board_chat_id):
+        played = submitted.get(user_id, frozenset())
+        missing = [game.name for game in GAMES if game.name not in played]
+        if missing:
+            name = nicknames.get(user_id) or names.get(user_id) or str(user_id)
+            owed.append((name, missing))
+
+    if owed:
+        owed.sort(key=lambda entry: entry[0].casefold())
+        lines = [f"{name}: {', '.join(missing)}" for name, missing in owed]
+        client.send_message(
+            chat_id=board_chat_id,
+            text="Krillion and Fermi are live!\nStill to play:\n" + "\n".join(lines),
+        )
+    store.mark_reminded(chat_id=board_chat_id, local_date=marker)
+    LOG.info("Posted the %s midday reminder to chat %s", day, board_chat_id)
+
+
 def run_polling(
     client: TelegramClient,
     cache: DuplicateCache,
@@ -787,6 +850,7 @@ def run_polling(
         # A failed reminder round must not prevent the daily post, and neither
         # task may prevent incoming updates from being processed.
         for name, task in (
+            ("midday reminder", send_midday_reminder),
             ("reminders", send_due_reminders),
             ("leaderboard", post_due_leaderboard),
         ):
@@ -795,7 +859,7 @@ def run_polling(
                 "utc_offset_minutes": utc_offset_minutes,
                 "post_minute": post_minute,
             }
-            if name == "leaderboard":
+            if name != "reminders":
                 options["nicknames"] = nicknames
             try:
                 task(client, store, **options)
