@@ -1,6 +1,6 @@
 import unittest
 
-from sfbot.games import parse_result
+from sfbot.games import expected_puzzle, parse_result
 
 
 class ParseResultTests(unittest.TestCase):
@@ -147,6 +147,19 @@ class ParseResultTests(unittest.TestCase):
         self.assertEqual(result.detail, "")
         # The game ends at four mistakes, so a loss already sorts last.
         self.assertGreaterEqual(result.rank_key, 4)
+
+    def test_expected_puzzle_counts_one_a_day_from_the_anchor(self) -> None:
+        for game, anchored, day_before, later in (
+            ("Wordle", "1933", "1932", "1934"),
+            ("Connections", "1211", "1210", "1212"),
+            ("Krillion", "81", "80", "82"),
+            ("Fermi", "70", "69", "71"),
+        ):
+            self.assertEqual(expected_puzzle(game, "2026-10-04"), anchored)
+            self.assertEqual(expected_puzzle(game, "2026-10-03"), day_before)
+            self.assertEqual(expected_puzzle(game, "2026-10-05"), later)
+        # Month and year boundaries are plain calendar days.
+        self.assertEqual(expected_puzzle("Wordle", "2027-01-01"), "2022")
 
     def test_unrelated_text_is_not_a_result(self) -> None:
         self.assertIsNone(parse_result(""))

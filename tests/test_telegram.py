@@ -270,7 +270,7 @@ class HandleMessageTests(unittest.TestCase):
         )
 
     def test_a_nickname_is_the_name_on_the_board(self) -> None:
-        self.dm("Wordle 1,234 3/6", nicknames={5: "Juan"})
+        self.dm("Wordle 4,351 3/6", nicknames={5: "Juan"})
 
         standings = self.store.standings(chat_id=GROUP, local_date="2033-05-18")
         self.assertEqual(standings[0].entries[0].display_name, "Alice")
@@ -420,11 +420,11 @@ class HandleMessageTests(unittest.TestCase):
 
     def test_a_direct_message_scores_against_the_group_board(self) -> None:
         self.dm(
-            "Wordle 1,234 3/6\n\n\U0001f7e9\U0001f7e9\U0001f7e9\U0001f7e9\U0001f7e9"
+            "Wordle 4,351 3/6\n\n\U0001f7e9\U0001f7e9\U0001f7e9\U0001f7e9\U0001f7e9"
         )
 
         # Confirmed privately, and nothing at all reaches the group.
-        self.assertEqual(self.client.sent, [(DM, "Recorded Wordle 1234 - 3/6")])
+        self.assertEqual(self.client.sent, [(DM, "Recorded Wordle 4351 - 3/6")])
         self.assertEqual(self.client.reactions, [])
         standings = self.store.standings(chat_id=GROUP, local_date="2033-05-18")
         self.assertEqual(standings[0].entries[0].display_name, "Alice")
@@ -432,18 +432,41 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(self.store.standings(chat_id=DM, local_date="2033-05-18"), [])
 
     def test_a_repeat_direct_message_says_so(self) -> None:
-        self.dm("Wordle 1,234 5/6")
-        self.dm("Wordle 1,234 2/6", message_id=8)
+        self.dm("Wordle 4,351 5/6")
+        self.dm("Wordle 4,351 2/6", message_id=8)
 
         self.assertEqual(
             self.client.sent,
             [
-                (DM, "Recorded Wordle 1234 - 5/6"),
+                (DM, "Recorded Wordle 4351 - 5/6"),
                 (DM, "You already submitted Wordle today."),
             ],
         )
         standings = self.store.standings(chat_id=GROUP, local_date="2033-05-18")
         self.assertEqual(standings[0].entries[0].score, "5/6")
+
+    def test_a_stale_puzzle_is_refused_and_not_recorded(self) -> None:
+        self.dm("Wordle 4,350 3/6")
+
+        self.assertEqual(
+            self.client.sent, [(DM, "That's Wordle 4350, but today's is 4351.")]
+        )
+        self.assertEqual(self.store.standings(chat_id=GROUP, local_date="2033-05-18"), [])
+
+    def test_a_stale_group_paste_is_ignored_silently(self) -> None:
+        self.handle(
+            {
+                "chat": {"id": GROUP, "type": "supergroup"},
+                "message_id": 7,
+                "date": 2_000_000_000,
+                "from": {"id": 5, "first_name": "Alice"},
+                "text": "Wordle 4,350 3/6",
+            }
+        )
+
+        self.assertEqual(self.client.sent, [])
+        self.assertEqual(self.client.reactions, [])
+        self.assertEqual(self.store.standings(chat_id=GROUP, local_date="2033-05-18"), [])
 
     def test_unrecognized_direct_messages_are_left_alone(self) -> None:
         self.dm("hey what's the plan for tonight")
@@ -458,7 +481,7 @@ class HandleMessageTests(unittest.TestCase):
                 "message_id": 7,
                 "date": 2_000_000_000,
                 "from": {"id": 5, "first_name": "Alice"},
-                "text": "Wordle 1,234 3/6",
+                "text": "Wordle 4,351 3/6",
             }
         )
 
@@ -468,10 +491,10 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(standings[0].entries[0].score, "3/6")
 
     def test_leaderboard_command_answers_in_the_chat_that_asked(self) -> None:
-        self.dm("Wordle 1,234 3/6")
+        self.dm("Wordle 4,351 3/6")
         self.client.sent.clear()
 
-        board = "Daily games - 2033-05-18\n\n🆆 Wordle 1234\n1. 👑 Alice - 3/6"
+        board = "Daily games - 2033-05-18\n\n🆆 Wordle 4351\n1. 👑 Alice - 3/6"
         for chat_id, chat_type, text in (
             (DM, "private", "/leaderboard"),
             (GROUP, "supergroup", "/leaderboard@sfbot"),
@@ -491,8 +514,8 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(self.client.sent, [(DM, board), (GROUP, board)])
 
     def test_chad_and_chud_commands_repeat_the_posted_messages(self) -> None:
-        self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
-        self.dm("Wordle 1,234 5/6", user_id=6, name="Bob")
+        self.dm("Wordle 4,351 2/6", user_id=5, name="Alice")
+        self.dm("Wordle 4,351 5/6", user_id=6, name="Bob")
         self.client.sent.clear()
 
         def ask(command: str, *, chat_id: int = DM, user_id: int = 5) -> None:
@@ -540,7 +563,7 @@ class HandleMessageTests(unittest.TestCase):
                 "message_id": 21,
                 "date": 2_000_035_900,
                 "from": {"id": 7, "first_name": "Cara"},
-                "text": "Wordle 1,234 1/6",
+                "text": "Wordle 4,351 1/6",
             }
         )
         ask("/chad@sfbot", chat_id=GROUP)
@@ -554,8 +577,8 @@ class HandleMessageTests(unittest.TestCase):
         self.assertIn("roster", self.client.sent[0][1])
 
     def test_daily_and_overall_commands_show_saved_titles_in_dm_and_group(self) -> None:
-        self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
-        self.dm("Wordle 1,234 5/6", user_id=6, name="Bob", message_id=8)
+        self.dm("Wordle 4,351 2/6", user_id=5, name="Alice")
+        self.dm("Wordle 4,351 5/6", user_id=6, name="Bob", message_id=8)
         self.client.sent.clear()
 
         def ask(command: str, chat_id: int = DM, user_id: int = 5) -> None:
@@ -586,7 +609,7 @@ class HandleMessageTests(unittest.TestCase):
             "chat": {"id": GROUP, "type": "supergroup"},
             "message_id": 31, "date": 2_000_035_900,
             "from": {"id": 7, "first_name": "Cara"},
-            "text": "Wordle 1,234 1/6",
+            "text": "Wordle 4,351 1/6",
         })
         ask("/daily", chat_id=GROUP)
         ask("/overall")
@@ -605,8 +628,8 @@ class HandleMessageTests(unittest.TestCase):
             chat_id=GROUP, local_date="2033-05-17",
             chad_winners=[(5, "Alice")],
         )
-        self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
-        self.dm("Wordle 1,234 5/6", user_id=6, name="Bob", message_id=8)
+        self.dm("Wordle 4,351 2/6", user_id=5, name="Alice")
+        self.dm("Wordle 4,351 5/6", user_id=6, name="Bob", message_id=8)
         post_due_leaderboard(
             self.client,  # type: ignore[arg-type]
             self.store, board_chat_id=GROUP, utc_offset_minutes=SGT_OFFSET,
@@ -623,8 +646,8 @@ class HandleMessageTests(unittest.TestCase):
         self.assertIn("🔥 Juan: 2-day CHAD streak!", self.client.sent[0][1])
 
     def test_a_nickname_change_reaches_the_chad_and_chud_commands(self) -> None:
-        self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
-        self.dm("Wordle 1,234 5/6", user_id=6, name="Bob", message_id=8)
+        self.dm("Wordle 4,351 2/6", user_id=5, name="Alice")
+        self.dm("Wordle 4,351 5/6", user_id=6, name="Bob", message_id=8)
         post_due_leaderboard(
             self.client,  # type: ignore[arg-type]
             self.store,
@@ -647,8 +670,8 @@ class HandleMessageTests(unittest.TestCase):
         # A day posted before winners were recorded leaves only its message,
         # so the names in it are the only way back to the players.
         for user_id, name, text in (
-            (5, "Alice", "Wordle 1,234 2/6"),
-            (6, "Bob", "Wordle 1,234 5/6"),
+            (5, "Alice", "Wordle 4,351 2/6"),
+            (6, "Bob", "Wordle 4,351 5/6"),
         ):
             result = parse_result(text)
             assert result is not None
@@ -676,8 +699,8 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(chud[1], "🚽 Ding ding ding! Diddy is the CHUD of the day!")
 
     def test_a_day_posted_with_no_saved_announcement_is_recomputed(self) -> None:
-        self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
-        self.dm("Wordle 1,234 5/6", user_id=6, name="Bob", message_id=8)
+        self.dm("Wordle 4,351 2/6", user_id=5, name="Alice")
+        self.dm("Wordle 4,351 5/6", user_id=6, name="Bob", message_id=8)
         # Posted before announcements were saved at all.
         self.store.mark_posted(chat_id=GROUP, local_date="2033-05-18")
         self.client.sent.clear()
@@ -691,8 +714,8 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(chud[1], "🚽 Ding ding ding! Diddy is the CHUD of the day!")
 
     def test_a_nickname_dropped_after_the_post_falls_back_to_the_name(self) -> None:
-        self.dm("Wordle 1,234 2/6", user_id=5, name="Alice")
-        self.dm("Wordle 1,234 5/6", user_id=6, name="Bob", message_id=8)
+        self.dm("Wordle 4,351 2/6", user_id=5, name="Alice")
+        self.dm("Wordle 4,351 5/6", user_id=6, name="Bob", message_id=8)
         post_due_leaderboard(
             self.client,  # type: ignore[arg-type]
             self.store,
@@ -778,7 +801,7 @@ class HandleMessageTests(unittest.TestCase):
                 "message_id": 9,
                 "date": 2_000_000_000,
                 "from": {"id": 99, "first_name": "Mallory"},
-                "text": "Wordle 1,234 1/6",
+                "text": "Wordle 4,351 1/6",
             }
         )
         command = "/leaderboard"
@@ -815,7 +838,7 @@ class HandleMessageTests(unittest.TestCase):
         )
 
     def test_a_stranger_cannot_submit_by_direct_message(self) -> None:
-        self.dm("Wordle 1,234 1/6", user_id=99, name="Mallory")
+        self.dm("Wordle 4,351 1/6", user_id=99, name="Mallory")
 
         self.assertEqual(len(self.client.sent), 1)
         self.assertIn("roster", self.client.sent[0][1])
@@ -853,9 +876,9 @@ class HandleMessageTests(unittest.TestCase):
         )
         self.assertTrue(self.store.is_member(chat_id=GROUP, user_id=9))
 
-        self.dm("Wordle 1,234 4/6", user_id=9, name="Dave", message_id=2)
+        self.dm("Wordle 4,351 4/6", user_id=9, name="Dave", message_id=2)
 
-        self.assertEqual(self.client.sent, [(DM, "Recorded Wordle 1234 - 4/6")])
+        self.assertEqual(self.client.sent, [(DM, "Recorded Wordle 4351 - 4/6")])
         board = self.store.standings(chat_id=GROUP, local_date="2033-05-18")[0]
         self.assertEqual(board.entries[0].display_name, "Dave")
 
@@ -870,7 +893,7 @@ class HandleMessageTests(unittest.TestCase):
                 "message_id": 7,
                 "date": 2_000_000_000,
                 "from": {"id": 5, "first_name": "Alice"},
-                "text": "Wordle 1,234 3/6",
+                "text": "Wordle 4,351 3/6",
             },
             board_chat_id=None,
         )
@@ -887,7 +910,7 @@ class HandleMessageTests(unittest.TestCase):
                 "message_id": 7,
                 "date": 2_000_000_000,
                 "from": {"id": 5, "first_name": "Alice"},
-                "text": "Wordle 1,234 3/6 https://x.com/alice/status/123",
+                "text": "Wordle 4,351 3/6 https://x.com/alice/status/123",
             }
         )
 
@@ -1114,7 +1137,7 @@ class SendDueRemindersTests(unittest.TestCase):
         )
 
     def test_each_member_is_dmd_only_the_games_they_still_owe(self) -> None:
-        self.record("Wordle 1,234 3/6", user_id=5, name="Alice")
+        self.record("Wordle 4,351 3/6", user_id=5, name="Alice")
 
         # 2033-05-18 20:00 SGT, an hour before the 21:00 post.
         self.remind(2_000_030_400)
@@ -1154,7 +1177,7 @@ class SendDueRemindersTests(unittest.TestCase):
 
     def test_someone_with_nothing_left_is_not_reminded(self) -> None:
         for text, name in (
-            ("Wordle 1,234 3/6", "Alice"),
+            ("Wordle 4,351 3/6", "Alice"),
             ("Krillion #7\n1,200", "Alice"),
             ("Fermi 42\n1.0\u00d7 score", "Alice"),
             (
@@ -1200,7 +1223,7 @@ class PostDueLeaderboardTests(unittest.TestCase):
         )
 
     def test_the_group_is_posted_to_once_per_day(self) -> None:
-        result = parse_result("Wordle 1,234 3/6")
+        result = parse_result("Wordle 4,351 3/6")
         assert result is not None
         self.store.record(
             chat_id=GROUP,
@@ -1218,14 +1241,14 @@ class PostDueLeaderboardTests(unittest.TestCase):
         # The game boards, titles, and final ranking are sent once in that order.
         self.assertEqual(len(self.client.sent), 4)
         self.assertEqual(self.client.sent[0][0], GROUP)
-        self.assertIn("Wordle 1234", self.client.sent[0][1])
+        self.assertIn("Wordle 4351", self.client.sent[0][1])
         self.assertIn("Final rankings", self.client.sent[3][1])
         self.assertIn("👑 🚽 Alice", self.client.sent[3][1])
 
     def test_the_daily_post_crowns_a_chud(self) -> None:
         for user_id, name, text in (
-            (5, "Alice", "Wordle 1,234 2/6"),
-            (6, "Bob", "Wordle 1,234 5/6"),
+            (5, "Alice", "Wordle 4,351 2/6"),
+            (6, "Bob", "Wordle 4,351 5/6"),
         ):
             result = parse_result(text)
             assert result is not None
@@ -1254,7 +1277,7 @@ class PostDueLeaderboardTests(unittest.TestCase):
             chad_winners=[(5, "Alice")], chud_winners=[(6, "Bob")],
         )
         for user_id, name, score in ((5, "Alice", "2/6"), (6, "Bob", "5/6")):
-            result = parse_result(f"Wordle 1,234 {score}")
+            result = parse_result(f"Wordle 4,351 {score}")
             assert result is not None
             self.store.record(
                 chat_id=GROUP, local_date="2033-05-18", user_id=user_id,
@@ -1272,7 +1295,7 @@ class PostDueLeaderboardTests(unittest.TestCase):
         self.assertEqual(self.client.sent, [])
 
     def test_scheduled_post_uses_the_current_nickname(self) -> None:
-        result = parse_result("Wordle 1,234 3/6")
+        result = parse_result("Wordle 4,351 3/6")
         assert result is not None
         self.store.record(
             chat_id=GROUP,
@@ -1289,7 +1312,7 @@ class PostDueLeaderboardTests(unittest.TestCase):
 
     def test_shared_nicknames_keep_posted_and_saved_winners_consistent(self) -> None:
         for user_id, name, score in ((5, "Alice", "2/6"), (6, "Bob", "5/6")):
-            result = parse_result(f"Wordle 1,234 {score}")
+            result = parse_result(f"Wordle 4,351 {score}")
             assert result is not None
             self.store.record(
                 chat_id=GROUP, local_date="2033-05-18", user_id=user_id,
@@ -1309,8 +1332,8 @@ class PostDueLeaderboardTests(unittest.TestCase):
 
     def test_the_post_records_who_won_by_user_id(self) -> None:
         for user_id, name, text in (
-            (5, "Alice", "Wordle 1,234 2/6"),
-            (6, "Bob", "Wordle 1,234 5/6"),
+            (5, "Alice", "Wordle 4,351 2/6"),
+            (6, "Bob", "Wordle 4,351 5/6"),
         ):
             result = parse_result(text)
             assert result is not None
