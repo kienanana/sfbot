@@ -15,7 +15,7 @@ from types import MappingProxyType
 from typing import Any
 
 from .cache import DuplicateCache
-from .games import GAMES, parse_result
+from .games import GAMES, expected_puzzle, parse_result
 from .leaderboard import (
     GameStandings,
     LeaderboardStore,
@@ -318,9 +318,29 @@ def _record_submission(
         client.send_message(chat_id=origin_chat_id, text=_UNKNOWN_SENDER)
         return
 
+    day = local_date(seen_at, utc_offset_minutes=utc_offset_minutes)
+    expected = expected_puzzle(result.game, day)
+    if expected is not None and result.puzzle_id != expected:
+        LOG.info(
+            "Ignored %s %s from user %s: expected %s",
+            result.game,
+            result.puzzle_id,
+            user_id,
+            expected,
+        )
+        if is_private:
+            client.send_message(
+                chat_id=origin_chat_id,
+                text=(
+                    f"That's {result.game} {result.puzzle_id}, but today's is"
+                    f" {expected}."
+                ),
+            )
+        return
+
     recorded = store.record(
         chat_id=board_chat_id,
-        local_date=local_date(seen_at, utc_offset_minutes=utc_offset_minutes),
+        local_date=day,
         user_id=user_id,
         display_name=display_name,
         result=result,

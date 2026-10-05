@@ -293,6 +293,9 @@ Write a parser in `sfbot/games.py` that returns a `ParsedResult` (or `None`) and
 - `rank_key` orders the board, lowest first. An unsolved puzzle needs a value
   above every solved one. Negate it when the game scores higher-is-better, as
   Krillion's dive depth does.
+- `anchor` is a puzzle number and the SGT date it was released. A result whose
+  number is not that day's is refused, so yesterday's puzzle cannot count today.
+  Update it if a game ever renumbers; without an anchor any number is accepted.
 
 Anchor the pattern to whole lines so prose that merely mentions the game does
 not match, and add cases to `tests/test_games.py` from real share text.

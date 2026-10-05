@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import date
 
 # Telegram delivers share text verbatim, including the non-breaking spaces some
 # games emit, so the separators are matched as horizontal whitespace only. The
@@ -176,6 +177,8 @@ class Game:
     emoji: str
     url: str
     parse: Callable[[str], ParsedResult | None]
+    # A puzzle number and the SGT date it was released; one puzzle a day follows.
+    anchor: tuple[int, date] | None = None
 
 
 GAMES: tuple[Game, ...] = (
@@ -184,18 +187,39 @@ GAMES: tuple[Game, ...] = (
         "🆆",
         "https://www.nytimes.com/games/wordle/index.html",
         _parse_wordle,
+        (1933, date(2026, 10, 4)),
     ),
-    Game("Krillion", "🦐", "https://krillion.io/", _parse_krillion),
-    Game("Fermi", "🧮", "https://fermi.gg/", _parse_fermi),
+    Game(
+        "Krillion",
+        "🦐",
+        "https://krillion.io/",
+        _parse_krillion,
+        (81, date(2026, 10, 4)),
+    ),
+    Game("Fermi", "🧮", "https://fermi.gg/", _parse_fermi, (70, date(2026, 10, 4))),
     Game(
         "Connections",
         "🧩",
         "https://www.nytimes.com/games/connections",
         _parse_connections,
+        (1211, date(2026, 10, 4)),
     ),
 )
 
 GAME_BY_NAME = {game.name: game for game in GAMES}
+
+
+def expected_puzzle(game: str, day: str) -> str | None:
+    """Return the puzzle number a game should show on a local date (YYYY-MM-DD).
+
+    None when the game has no anchor, in which case any number is accepted.
+    """
+
+    anchor = GAME_BY_NAME[game].anchor
+    if anchor is None:
+        return None
+    number, released = anchor
+    return str(number + (date.fromisoformat(day) - released).days)
 
 
 def parse_result(text: str) -> ParsedResult | None:
