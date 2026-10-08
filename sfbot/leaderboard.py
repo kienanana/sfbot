@@ -828,9 +828,18 @@ def format_daily_ranking(
 def format_overall_ranking(ranking: Sequence[OverallRank]) -> str:
     if not ranking:
         return "No CHAD or CHUD titles have been recorded yet."
+    place_width = len(str(len(ranking)))
+    name_width = max(len(rank.display_name) for rank in ranking)
+    chad_width = max(len(str(rank.chads)) for rank in ranking)
+    chud_width = max(len(str(rank.chuds)) for rank in ranking)
+    streak_width = max(
+        len(str(streak))
+        for rank in ranking
+        for streak in (rank.chad_streak, rank.chud_streak)
+    )
     lines = [
         "Overall leaderboard",
-        "👑 CHADs  🚽 CHUDs  🔥 CHAD streak  💩 CHUD streak",
+        "👑 CHADs  🚽 CHUDs  🔥/💩 streak",
     ]
     place = 0
     previous: tuple[int, int] | None = None
@@ -840,13 +849,13 @@ def format_overall_ranking(ranking: Sequence[OverallRank]) -> str:
             place = index
             previous = score
         parts = [
-            f"{place}. {rank.display_name} — 👑 {rank.chads}",
-            f"🚽 {rank.chuds}",
+            f"{place:>{place_width}}. {rank.display_name:<{name_width}} - 👑 {rank.chads:>{chad_width}}",
+            f"🚽 {rank.chuds:>{chud_width}}",
         ]
         if rank.chad_streak > 0:
-            parts.append(f"🔥 {rank.chad_streak}")
-        if rank.chud_streak > 0:
-            parts.append(f"💩 {rank.chud_streak}")
+            parts.append(f"🔥 {rank.chad_streak:>{streak_width}}")
+        elif rank.chud_streak > 0:
+            parts.append(f"💩 {rank.chud_streak:>{streak_width}}")
         lines.append("  ".join(parts))
     return "\n".join(lines)
 
