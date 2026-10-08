@@ -9,6 +9,7 @@ from sfbot.leaderboard import (
     GameStandings,
     DailyRank,
     LeaderboardStore,
+    OverallRank,
     PostedAnnouncement,
     apply_nicknames,
     chad_winners,
@@ -126,11 +127,14 @@ class LeaderboardStoreTests(unittest.TestCase):
             [(5, 3, 0, 3, 0), (6, 1, 1, 0, 1), (7, 0, 2, 0, 0)],
         )
         shown = format_overall_ranking(ranks)
-        self.assertIn("Juan — 👑 3  🚽 0  🔥 3", shown)
-        self.assertNotIn("Juan — 👑 3  🚽 0  🔥 3  💩", shown)
-        self.assertIn("Alex — 👑 1  🚽 1  💩 1", shown)
-        self.assertIn("Cara — 👑 0  🚽 2", shown)
-        self.assertNotIn("Cara — 👑 0  🚽 2  🔥", shown)
+        self.assertEqual(
+            shown.splitlines()[2:],
+            [
+                "1. Juan - 👑 3  🚽 0  🔥 3",
+                "2. Alex - 👑 1  🚽 1  💩 1",
+                "3. Cara - 👑 0  🚽 2",
+            ],
+        )
         self.assertEqual(
             self.store.title_streaks(
                 chat_id=-100, local_date=DAY, winners=[(5, "Alex"), (6, "Alex")],
@@ -142,6 +146,21 @@ class LeaderboardStoreTests(unittest.TestCase):
             chat_id=-100, local_date="2033-05-20", chad_winners=[(5, "Alex")]
         )
         self.assertEqual(self.store.overall_ranking(chat_id=-100)[0].chad_streak, 1)
+
+    def test_overall_columns_follow_the_longest_name_and_counts(self) -> None:
+        shown = format_overall_ranking([
+            OverallRank(1, "Christopher", 12, 0, 3, 0),
+            OverallRank(2, "Ana", 2, 10, 0, 12),
+            OverallRank(3, "Bo", 0, 3, 0, 0),
+        ])
+        self.assertEqual(
+            shown.splitlines()[2:],
+            [
+                "1. Christopher - 👑 12  🚽  0  🔥  3",
+                "2. Ana         - 👑  2  🚽 10  💩 12",
+                "3. Bo          - 👑  0  🚽  3",
+            ],
+        )
 
     def test_a_name_change_does_not_split_a_player(self) -> None:
         self.record("Alice", wordle("1/6", 1), user_id=5, submitted_at=1)

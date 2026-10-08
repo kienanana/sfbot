@@ -592,7 +592,14 @@ class HandleMessageTests(unittest.TestCase):
         ask("/daily")
         ask("/overall")
         self.assertEqual(self.client.sent[0], (DM, "Final rankings haven't been posted yet."))
-        self.assertIn("Juan — 👑 0  🚽 0", self.client.sent[1][1])
+        self.assertIn("Juan - 👑 0  🚽 0", self.client.sent[1][1])
+        overall_text = self.client.sent[1][1]
+        heading, _, body = overall_text.partition("\n")
+        self.assertEqual(self.client.sent_entities[-1], [{
+            "type": "pre",
+            "offset": len((heading + "\n").encode("utf-16-le")) // 2,
+            "length": len(body.encode("utf-16-le")) // 2,
+        }])
         self.client.sent.clear()
         post_due_leaderboard(
             self.client,  # type: ignore[arg-type]
@@ -615,8 +622,8 @@ class HandleMessageTests(unittest.TestCase):
         ask("/overall")
         self.assertIn("1. 👑 Juan — 1 point", self.client.sent[0][1])
         self.assertNotIn("Cara", self.client.sent[0][1])
-        self.assertIn("Juan — 👑 1", self.client.sent[1][1])
-        self.assertIn("Cara — 👑 0  🚽 0", self.client.sent[1][1])
+        self.assertIn("Juan - 👑 1", self.client.sent[1][1])
+        self.assertIn("Cara - 👑 0  🚽 0", self.client.sent[1][1])
         self.client.sent.clear()
         ask("/daily", user_id=99)
         ask("/overall", chat_id=OTHER_GROUP)

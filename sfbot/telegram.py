@@ -524,11 +524,21 @@ def handle_message(
             return
 
         if command == _OVERALL_COMMAND:
+            ranking = store.overall_ranking(chat_id=board_chat_id, nicknames=nicknames)
+            text = format_overall_ranking(ranking)
+            heading, separator, body = text.partition("\n")
+            entities = None
+            if separator:
+                # Telegram needs monospace text for the padded columns to align.
+                entities = [{
+                    "type": "pre",
+                    "offset": _utf16_length(heading + separator),
+                    "length": _utf16_length(body),
+                }]
             client.send_message(
                 chat_id=chat_id,
-                text=format_overall_ranking(
-                    store.overall_ranking(chat_id=board_chat_id, nicknames=nicknames)
-                ),
+                text=text,
+                entities=entities,
             )
             return
 
