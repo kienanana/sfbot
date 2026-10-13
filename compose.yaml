@@ -11,8 +11,6 @@ services:
       SFBOT_LEADERBOARD_AT: "21:00"
       SFBOT_ACTION_WORD: ${SFBOT_ACTION_WORD:-}
       SFBOT_NICKNAMES: ${SFBOT_NICKNAMES:-}
-      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
-      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
     volumes:
       - sfbot-data:/data
 
