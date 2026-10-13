@@ -15,6 +15,7 @@ from types import MappingProxyType
 from typing import Any
 
 from .cache import DuplicateCache
+from .cleanup import MIN_NEEDLE_LENGTH, Cleaner
 from .games import GAMES, expected_puzzle, parse_result
 from .leaderboard import (
     GameStandings,
@@ -44,7 +45,9 @@ _CHAD_COMMAND = "/chad"
 _CHUD_COMMAND = "/chud"
 _DAILY_COMMAND = "/daily"
 _OVERALL_COMMAND = "/overall"
+_CLEANUP_COMMAND = "/cleanup"
 _ACKNOWLEDGEMENT = "\N{THUMBS UP SIGN}"
+_CHECK = {True: "\N{WHITE HEAVY CHECK MARK}", False: "\N{CROSS MARK}"}
 _UNKNOWN_SENDER = (
     "I don't have you on the group roster yet. Say anything in the group chat,"
     " then send this again."
@@ -173,6 +176,32 @@ class TelegramClient:
                 "reaction": [{"type": "emoji", "emoji": emoji}],
             },
             timeout=20,
+        )
+
+    def delete_message(self, *, chat_id: int, message_id: int) -> None:
+        self._call(
+            "deleteMessage", {"chat_id": chat_id, "message_id": message_id}, timeout=20
+        )
+
+    def can_delete_messages(self, *, chat_id: int) -> bool:
+        """Return whether the bot may delete other people's messages in a chat."""
+
+        me = self._call("getMe", {}, timeout=20)
+        member = self._call(
+            "getChatMember", {"chat_id": chat_id, "user_id": me["id"]}, timeout=20
+        )
+        return member.get("status") == "administrator" and bool(
+            member.get("can_delete_messages")
+        )
+
+    def is_admin(self, *, chat_id: int, user_id: int) -> bool:
+        member = self._call(
+            "getChatMember", {"chat_id": chat_id, "user_id": user_id}, timeout=20
+        )
+        # An admin without the delete right must not delete through the bot.
+        return member.get("status") == "creator" or (
+            member.get("status") == "administrator"
+            and bool(member.get("can_delete_messages"))
         )
 
 
@@ -457,6 +486,7 @@ def handle_message(
     board_chat_id: int | None,
     action_word: str | None = None,
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
+    cleaner: Cleaner | None = None,
 ) -> None:
     chat = message.get("chat")
     if not isinstance(chat, Mapping) or not isinstance(chat.get("id"), int):
@@ -484,6 +514,62 @@ def handle_message(
     if command == _GAMES_COMMAND:
         text, entities = _games_message()
         client.send_message(chat_id=chat_id, text=text, entities=entities)
+        return
+
+    if command == _CLEANUP_COMMAND:
+        # Only a supergroup numbers its messages per chat, which is what lets
+        # the sweep walk the whole history by ID.
+        if chat.get("type") != "supergroup":
+            return
+        if sender is None or not client.is_admin(chat_id=chat_id, user_id=sender[0]):
+            client.send_message(
+                chat_id=chat_id, text="Only group admins can run /cleanup."
+            )
+            return
+        can_delete = client.can_delete_messages(chat_id=chat_id)
+        if cleaner is None or not can_delete:
+            # Both lines are always shown so the chat can see what is left.
+            client.send_message(
+                chat_id=chat_id,
+                text="\n".join(
+                    [
+                        "/cleanup isn't set up yet:",
+                        f"{_CHECK[cleaner is not None]} TELEGRAM_API_ID and"
+                        " TELEGRAM_API_HASH are set in .env",
+                        f"{_CHECK[can_delete]} I'm a group admin allowed to"
+                        " delete messages",
+                    ]
+                ),
+            )
+            return
+        # The command spells out the words being purged, so it goes first, even
+        # if it turns out malformed. Replies never repeat the words.
+        client.delete_message(chat_id=chat_id, message_id=message_id)
+        # Everything after the command token, which may carry an @botname.
+        argument = "".join(_message_body(message).split(maxsplit=1)[1:])
+        needles = [needle.strip() for needle in argument.split(",") if needle.strip()]
+        # Wildcards don't count, or a lone * would match every message.
+        if not needles or any(
+            len(needle.replace("*", "")) < MIN_NEEDLE_LENGTH for needle in needles
+        ):
+            client.send_message(
+                chat_id=chat_id,
+                text=(
+                    "Usage: /cleanup <word>[, <word>...], each at least"
+                    f" {MIN_NEEDLE_LENGTH} characters besides *."
+                ),
+            )
+            return
+        started = cleaner.start(
+            chat_id=chat_id,
+            needles=needles,
+            last_message_id=message_id,
+            report=lambda text: client.send_message(chat_id=chat_id, text=text),
+        )
+        if started:
+            client.send_message(chat_id=chat_id, text="Cleanup started.")
+        else:
+            client.send_message(chat_id=chat_id, text="A cleanup is already running.")
         return
 
     if command in (
@@ -803,6 +889,7 @@ def run_polling(
     post_minute: int | None = None,
     action_word: str | None = None,
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
+    cleaner: Cleaner | None = None,
 ) -> None:
     offset: int | None = None
     poll_backoff = 1
@@ -870,6 +957,7 @@ def run_polling(
                             board_chat_id=board_chat_id,
                             action_word=action_word,
                             nicknames=nicknames,
+                            cleaner=cleaner,
                         )
                     except request_errors as error:
                         transient = not isinstance(error, TelegramAPIError) or (
