@@ -18,8 +18,8 @@ Setting `SFBOT_ACTION_WORD` adds a callout naming whoever reposted. With
 
 ```
 sf @Bob                                     (a reply to Alice's message)
-Uh oh! Looks like Bob's getting *Nuked*
-Let's drop a /NukeBob
+Uh oh! Looks like Bob's getting *Sent to Nuke*
+Let's drop a /SendBobToNuke
 ```
 
 The past tense is the word plus `d`, so the word is expected to end in `e`. The
@@ -40,7 +40,7 @@ Some people go by something other than their Telegram name. `SFBOT_NICKNAMES`
 holds comma-separated `user_id:nickname` pairs and overrides the Telegram name
 everywhere the bot names someone — the `sf` reply's mention, the repeat-poster
 callout, the leaderboard, and the CHAD and CHUD announcements — so Bob who goes
-by Juan gets `/NukeJuan`:
+by Juan gets `/SendJuanToNuke`:
 
 ```dotenv
 SFBOT_NICKNAMES=123456789:Juan,987654321:Nikki
@@ -312,7 +312,7 @@ not match, and add cases to `tests/test_games.py` from real share text.
 | `SFBOT_LEADERBOARD_CHAT_ID` | Unset | Group the leaderboard posts to; unset disables the feature |
 | `SFBOT_UTC_OFFSET_MINUTES` | `480` | Local day boundary for the leaderboard (480 = SGT) |
 | `SFBOT_LEADERBOARD_AT` | `21:00` | Local time of the daily post; `off` for `/leaderboard` only |
-| `SFBOT_ACTION_WORD` | Unset | Verb for the repeat-poster callout; unset sends only the `sf` mention |
+| `SFBOT_ACTION_WORD` | Unset | Word for the repeat-poster callout; unset sends only the `sf` mention |
 | `SFBOT_NICKNAMES` | Unset | `user_id:nickname` pairs, comma separated; overrides Telegram names |
 
 ## Reliability and storage

@@ -57,7 +57,7 @@ def _post_minute() -> int | None:
 
 
 def _action_word() -> str | None:
-    """Return the callout verb for a repeated link, or None when unconfigured."""
+    """Return the callout word for a repeated link, or None when unconfigured."""
 
     raw = os.environ.get("SFBOT_ACTION_WORD", "").strip()
     return raw or None

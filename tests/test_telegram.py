@@ -208,8 +208,8 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(
             self.client.sent,
             [
-                (GROUP, "Uh oh! Looks like Alice's getting *Nuked*"),
-                (GROUP, "Let's drop a /NukeAlice"),
+                (GROUP, "Uh oh! Looks like Alice's getting *Sent to Nuke*"),
+                (GROUP, "Let's drop a /SendAliceToNuke"),
             ],
         )
 
@@ -237,8 +237,8 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(
             self.client.sent,
             [
-                (GROUP, "Uh oh! Looks like Bob's getting *Nuked*"),
-                (GROUP, "Let's drop a /NukeBob"),
+                (GROUP, "Uh oh! Looks like Bob's getting *Sent to Nuke*"),
+                (GROUP, "Let's drop a /SendBobToNuke"),
             ],
         )
 
@@ -264,8 +264,8 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(
             self.client.sent,
             [
-                (GROUP, "Uh oh! Looks like Juan's getting *Nuked*"),
-                (GROUP, "Let's drop a /NukeJuan"),
+                (GROUP, "Uh oh! Looks like Juan's getting *Sent to Nuke*"),
+                (GROUP, "Let's drop a /SendJuanToNuke"),
             ],
         )
 
@@ -341,7 +341,7 @@ class HandleMessageTests(unittest.TestCase):
         self.handle(share, client=client, action_word="Nuke")
         self.assertEqual(len(client.replies), 1)
         self.assertEqual(
-            client.sent, [(GROUP, "Uh oh! Looks like Bob's getting *Nuked*")]
+            client.sent, [(GROUP, "Uh oh! Looks like Bob's getting *Sent to Nuke*")]
         )
 
     def test_ambiguous_sf_timeout_does_not_send_a_second_reply(self) -> None:
