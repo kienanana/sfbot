@@ -63,14 +63,17 @@ belong to one player of that day.
 
 ## Cleanup
 
-`/cleanup <text>` deletes every message in the group whose text or caption
-contains `<text>`, ignoring case, all the way back to the group's first message.
-`/cleanup nuke` removes `Nuke`, `NUKED`, and `/NukeBob` alike, along with the
-command itself. The text must be at least 3 characters, anyone in the group can
+`/cleanup <word>[, <word>...]` deletes every message in the group whose text or
+caption contains any of the comma-separated words as a whole word, ignoring case,
+all the way back to the group's first message. `/cleanup nuke` removes `Nuke`
+and `NUKE!` but not `nuked` or `renuke`; `*` matches the rest of a word, so
+`/cleanup nuke*` also removes `NUKED` and `/NukeBob`. Each word needs at least 3
+characters besides `*`, only group admins with the right to delete messages can
 run it, and deletion cannot be undone.
 
-The bot reacts 👍 when a sweep starts and posts `Cleaned up N messages.` when it
-ends; neither repeats the text. One sweep runs at a time, in the background, so
+The bot deletes the command straight away so the words don't stay on screen,
+posts `Cleanup started.`, and posts `Cleaned up N messages.` when the sweep
+ends; neither repeats the words. One sweep runs at a time, in the background, so
 links, results, and the daily post keep working meanwhile.
 
 The Bot API cannot read a chat's history, so the sweep logs in over MTProto with
@@ -300,7 +303,7 @@ that day, unless overridden by a nickname.
 | `/chad`, `/chud` | The saved announcement for today, or a note that it is not decided yet |
 | `/daily` | Today's saved final ranking and placement scores after the daily post |
 | `/overall` | Each participant's total CHADs and CHUDs, plus 🔥 CHAD or 💩 CHUD streaks only while active |
-| `/cleanup <text>` | Deletes every message containing the text; see [Cleanup](#cleanup) |
+| `/cleanup <word>[, <word>...]` | Admins only: deletes every message containing any word; see [Cleanup](#cleanup) |
 
 Commands reply where you ask; a DM check stays private. In groups, standings,
 announcements, and submissions are available only in the configured leaderboard

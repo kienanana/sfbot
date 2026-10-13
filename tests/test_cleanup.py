@@ -37,23 +37,39 @@ class FakeMTProtoClient:
 class SweepTests(unittest.TestCase):
     def sweep(self, client: FakeMTProtoClient, needle: str, last: int) -> int:
         return asyncio.run(
-            sweep(client, chat_id=GROUP, needle=needle, last_message_id=last)
+            sweep(client, chat_id=GROUP, needles=[needle], last_message_id=last)
         )
 
-    def test_deletes_substring_matches_in_any_case(self) -> None:
+    def test_deletes_whole_word_matches_in_any_case(self) -> None:
         client = FakeMTProtoClient(
             {
                 1: "foo",
                 2: "unrelated",
-                3: "a FOObar b",
+                3: "a FOO! b",
                 4: "fOo",
                 5: "fo o",
+                6: "foobar",
                 7: "/cleanup Foo",
+                8: "befoo",
             }
         )
-        self.assertEqual(self.sweep(client, "Foo", 7), 4)
+        self.assertEqual(self.sweep(client, "Foo", 8), 4)
         self.assertEqual(client.deleted, [[1, 3, 4, 7]])
-        self.assertEqual(client.texts, {2: "unrelated", 5: "fo o"})
+        self.assertEqual(
+            client.texts, {2: "unrelated", 5: "fo o", 6: "foobar", 8: "befoo"}
+        )
+
+    def test_star_matches_the_rest_of_a_word(self) -> None:
+        client = FakeMTProtoClient(
+            {1: "nuke", 2: "NUKED it", 3: "/NukeBob", 4: "renuke"}
+        )
+        self.assertEqual(self.sweep(client, "nuke*", 4), 3)
+        self.assertEqual(client.texts, {4: "renuke"})
+
+    def test_needle_may_start_with_punctuation(self) -> None:
+        client = FakeMTProtoClient({1: "try /foo now", 2: "a/foo"})
+        self.assertEqual(self.sweep(client, "/foo", 2), 1)
+        self.assertEqual(client.texts, {2: "a/foo"})
 
     def test_skips_missing_and_textless_messages(self) -> None:
         client = FakeMTProtoClient({2: None, 3: "foo"})
@@ -68,6 +84,14 @@ class SweepTests(unittest.TestCase):
             [list(range(1, 101)), list(range(101, 201)), list(range(201, 251))],
         )
         self.assertEqual(client.deleted, [[1, 100], [101], [250]])
+
+    def test_deletes_messages_matching_any_needle(self) -> None:
+        client = FakeMTProtoClient({1: "foo", 2: "BAR", 3: "baz"})
+        deleted = asyncio.run(
+            sweep(client, chat_id=GROUP, needles=["foo", "bar"], last_message_id=3)
+        )
+        self.assertEqual(deleted, 2)
+        self.assertEqual(client.texts, {3: "baz"})
 
     def test_nothing_matching_deletes_nothing(self) -> None:
         client = FakeMTProtoClient({1: "bar"})

@@ -178,6 +178,11 @@ class TelegramClient:
             timeout=20,
         )
 
+    def delete_message(self, *, chat_id: int, message_id: int) -> None:
+        self._call(
+            "deleteMessage", {"chat_id": chat_id, "message_id": message_id}, timeout=20
+        )
+
     def can_delete_messages(self, *, chat_id: int) -> bool:
         """Return whether the bot may delete other people's messages in a chat."""
 
@@ -187,6 +192,16 @@ class TelegramClient:
         )
         return member.get("status") == "administrator" and bool(
             member.get("can_delete_messages")
+        )
+
+    def is_admin(self, *, chat_id: int, user_id: int) -> bool:
+        member = self._call(
+            "getChatMember", {"chat_id": chat_id, "user_id": user_id}, timeout=20
+        )
+        # An admin without the delete right must not delete through the bot.
+        return member.get("status") == "creator" or (
+            member.get("status") == "administrator"
+            and bool(member.get("can_delete_messages"))
         )
 
 
@@ -506,6 +521,11 @@ def handle_message(
         # the sweep walk the whole history by ID.
         if chat.get("type") != "supergroup":
             return
+        if sender is None or not client.is_admin(chat_id=chat_id, user_id=sender[0]):
+            client.send_message(
+                chat_id=chat_id, text="Only group admins can run /cleanup."
+            )
+            return
         can_delete = client.can_delete_messages(chat_id=chat_id)
         if cleaner is None or not can_delete:
             # Both lines are always shown so the chat can see what is left.
@@ -522,29 +542,32 @@ def handle_message(
                 ),
             )
             return
+        # The command spells out the words being purged, so it goes first, even
+        # if it turns out malformed. Replies never repeat the words.
+        client.delete_message(chat_id=chat_id, message_id=message_id)
         # Everything after the command token, which may carry an @botname.
-        needle = "".join(_message_body(message).split(maxsplit=1)[1:]).strip()
-        if len(needle) < MIN_NEEDLE_LENGTH:
+        argument = "".join(_message_body(message).split(maxsplit=1)[1:])
+        needles = [needle.strip() for needle in argument.split(",") if needle.strip()]
+        # Wildcards don't count, or a lone * would match every message.
+        if not needles or any(
+            len(needle.replace("*", "")) < MIN_NEEDLE_LENGTH for needle in needles
+        ):
             client.send_message(
                 chat_id=chat_id,
                 text=(
-                    "Usage: /cleanup <text>, with at least"
-                    f" {MIN_NEEDLE_LENGTH} characters."
+                    "Usage: /cleanup <word>[, <word>...], each at least"
+                    f" {MIN_NEEDLE_LENGTH} characters besides *."
                 ),
             )
             return
-        # The command is the newest message and contains the text itself, so
-        # the sweep ends by deleting it. The reports never repeat the text.
         started = cleaner.start(
             chat_id=chat_id,
-            needle=needle,
+            needles=needles,
             last_message_id=message_id,
             report=lambda text: client.send_message(chat_id=chat_id, text=text),
         )
         if started:
-            client.set_message_reaction(
-                chat_id=chat_id, message_id=message_id, emoji=_ACKNOWLEDGEMENT
-            )
+            client.send_message(chat_id=chat_id, text="Cleanup started.")
         else:
             client.send_message(chat_id=chat_id, text="A cleanup is already running.")
         return

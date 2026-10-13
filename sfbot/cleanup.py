@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -25,13 +26,28 @@ _BATCH_SIZE = 100
 _FLOOD_SLEEP_SECONDS = 60 * 60
 
 
-async def sweep(client: Any, *, chat_id: int, needle: str, last_message_id: int) -> int:
-    """Delete every message up to last_message_id whose text contains needle.
+def needle_pattern(needles: list[str]) -> re.Pattern[str]:
+    """Match any needle as a whole word, ignoring case; `*` matches word characters.
 
-    Matching ignores case. Returns how many messages Telegram deleted.
+    Lookarounds stand in for word boundaries so a needle may start or end with
+    punctuation, like a /command.
     """
 
-    needle = needle.casefold()
+    words = (re.escape(needle).replace(r"\*", r"\w*") for needle in needles)
+    return re.compile(
+        "|".join(rf"(?<!\w){word}(?!\w)" for word in words), re.IGNORECASE
+    )
+
+
+async def sweep(
+    client: Any, *, chat_id: int, needles: list[str], last_message_id: int
+) -> int:
+    """Delete every message up to last_message_id that matches any needle.
+
+    Returns how many messages Telegram deleted.
+    """
+
+    pattern = needle_pattern(needles)
     chat = await client.get_input_entity(chat_id)
     deleted = 0
     for start in range(1, last_message_id + 1, _BATCH_SIZE):
@@ -42,7 +58,7 @@ async def sweep(client: Any, *, chat_id: int, needle: str, last_message_id: int)
         matching = [
             message.id
             for message in messages
-            if message is not None and needle in (message.raw_text or "").casefold()
+            if message is not None and pattern.search(message.raw_text or "")
         ]
         if matching:
             for affected in await client.delete_messages(chat, matching):
@@ -69,7 +85,7 @@ class Cleaner:
         self,
         *,
         chat_id: int,
-        needle: str,
+        needles: list[str],
         last_message_id: int,
         report: Callable[[str], None],
     ) -> bool:
@@ -83,7 +99,7 @@ class Cleaner:
             return False
         threading.Thread(
             target=self._run,
-            args=(chat_id, needle, last_message_id, report),
+            args=(chat_id, needles, last_message_id, report),
             name="cleanup",
             daemon=True,
         ).start()
@@ -92,15 +108,15 @@ class Cleaner:
     def _run(
         self,
         chat_id: int,
-        needle: str,
+        needles: list[str],
         last_message_id: int,
         report: Callable[[str], None],
     ) -> None:
         try:
             try:
-                deleted = asyncio.run(self._sweep(chat_id, needle, last_message_id))
+                deleted = asyncio.run(self._sweep(chat_id, needles, last_message_id))
             except Exception:
-                # Nothing above this thread can catch it. The needle is left
+                # Nothing above this thread can catch it. The needles are left
                 # out of the log like every other message body.
                 LOG.exception("Cleanup of chat %s failed", chat_id)
                 report(
@@ -113,7 +129,7 @@ class Cleaner:
         finally:
             self._busy.release()
 
-    async def _sweep(self, chat_id: int, needle: str, last_message_id: int) -> int:
+    async def _sweep(self, chat_id: int, needles: list[str], last_message_id: int) -> int:
         # The session file spares a fresh bot login per sweep, which Telegram
         # rate limits. It is as sensitive as the token.
         client = self._telethon_client(
@@ -128,7 +144,7 @@ class Cleaner:
             return await sweep(
                 client,
                 chat_id=chat_id,
-                needle=needle,
+                needles=needles,
                 last_message_id=last_message_id,
             )
         finally:

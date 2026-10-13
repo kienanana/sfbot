@@ -29,9 +29,17 @@ class FakeTelegramClient:
         self.sent_entities: list[list[dict[str, object]] | None] = []
         self.reactions: list[tuple[int, int, str]] = []
         self.can_delete = True
+        self.admins = {5}
+        self.deleted: list[tuple[int, int]] = []
+
+    def delete_message(self, *, chat_id: int, message_id: int) -> None:
+        self.deleted.append((chat_id, message_id))
 
     def can_delete_messages(self, *, chat_id: int) -> bool:
         return self.can_delete
+
+    def is_admin(self, *, chat_id: int, user_id: int) -> bool:
+        return user_id in self.admins
 
     def send_sf_reply(
         self,
@@ -114,13 +122,15 @@ class BlockedDirectMessageClient(FakeTelegramClient):
 class FakeCleaner:
     def __init__(self, *, busy: bool = False) -> None:
         self.busy = busy
-        self.sweeps: list[tuple[int, str, int]] = []
+        self.sweeps: list[tuple[int, list[str], int]] = []
         self.reports: list[object] = []
 
-    def start(self, *, chat_id: int, needle: str, last_message_id: int, report) -> bool:
+    def start(
+        self, *, chat_id: int, needles: list[str], last_message_id: int, report
+    ) -> bool:
         if self.busy:
             return False
-        self.sweeps.append((chat_id, needle, last_message_id))
+        self.sweeps.append((chat_id, needles, last_message_id))
         self.reports.append(report)
         return True
 
@@ -188,31 +198,64 @@ class HandleMessageTests(unittest.TestCase):
             cleaner=cleaner,
         )
 
-    def test_cleanup_sweeps_up_to_the_command_and_acknowledges_it(self) -> None:
+    def test_cleanup_deletes_the_command_and_sweeps_up_to_it(self) -> None:
         cleaner = FakeCleaner()
         self.cleanup("/cleanup@sfbot  Foo Bar ", cleaner=cleaner)
-        self.assertEqual(cleaner.sweeps, [(GROUP, "Foo Bar", 900)])
-        self.assertEqual(self.client.reactions, [(GROUP, 900, "\N{THUMBS UP SIGN}")])
-        self.assertEqual(self.client.sent, [])
+        self.assertEqual(self.client.deleted, [(GROUP, 900)])
+        self.assertEqual(cleaner.sweeps, [(GROUP, ["Foo Bar"], 900)])
+        self.assertEqual(self.client.sent, [(GROUP, "Cleanup started.")])
 
         cleaner.reports[0]("Cleaned up 3 messages.")
-        self.assertEqual(self.client.sent, [(GROUP, "Cleaned up 3 messages.")])
+        self.assertEqual(self.client.sent[-1], (GROUP, "Cleaned up 3 messages."))
+
+    def test_cleanup_splits_comma_separated_texts(self) -> None:
+        cleaner = FakeCleaner()
+        self.cleanup("/cleanup foo, Bar Baz ,,qux", cleaner=cleaner)
+        self.assertEqual(cleaner.sweeps, [(GROUP, ["foo", "Bar Baz", "qux"], 900)])
 
     def test_cleanup_refuses_a_missing_or_short_argument(self) -> None:
         cleaner = FakeCleaner()
-        for text in ("/cleanup", "/cleanup   ", "/cleanup ab"):
+        texts = (
+            "/cleanup",
+            "/cleanup   ",
+            "/cleanup ab",
+            "/cleanup foo, ab",
+            "/cleanup ,",
+            "/cleanup *",
+            "/cleanup ab*",
+        )
+        for text in texts:
             with self.subTest(text=text):
                 self.cleanup(text, cleaner=cleaner)
         self.assertEqual(cleaner.sweeps, [])
+        # Deleted even when malformed, since it may still spell out a word.
+        self.assertEqual(self.client.deleted, [(GROUP, 900)] * len(texts))
         self.assertEqual(
             self.client.sent,
-            [(GROUP, "Usage: /cleanup <text>, with at least 3 characters.")] * 3,
+            [
+                (
+                    GROUP,
+                    "Usage: /cleanup <word>[, <word>...], each at least 3"
+                    " characters besides *.",
+                )
+            ]
+            * len(texts),
         )
+
+    def test_cleanup_is_refused_for_non_admins(self) -> None:
+        cleaner = FakeCleaner()
+        self.client.admins = set()
+        self.cleanup("/cleanup foo", cleaner=cleaner)
+        self.assertEqual(cleaner.sweeps, [])
+        self.assertEqual(
+            self.client.sent, [(GROUP, "Only group admins can run /cleanup.")]
+        )
+        self.assertEqual(self.client.deleted, [])
 
     def test_cleanup_reports_a_sweep_already_running(self) -> None:
         self.cleanup("/cleanup foo", cleaner=FakeCleaner(busy=True))
+        self.assertEqual(self.client.deleted, [(GROUP, 900)])
         self.assertEqual(self.client.sent, [(GROUP, "A cleanup is already running.")])
-        self.assertEqual(self.client.reactions, [])
 
     def test_cleanup_is_ignored_outside_a_supergroup(self) -> None:
         cleaner = FakeCleaner()
@@ -247,7 +290,7 @@ class HandleMessageTests(unittest.TestCase):
                 )
                 if cleaner is not None:
                     self.assertEqual(cleaner.sweeps, [])
-        self.assertEqual(self.client.reactions, [])
+        self.assertEqual(self.client.deleted, [])
 
     def dm(
         self,
@@ -1158,6 +1201,20 @@ class TelegramClientTests(unittest.TestCase):
                 self.assertEqual(
                     call.call_args.args[1], {"chat_id": GROUP, "user_id": 42}
                 )
+
+    def test_is_admin_needs_the_delete_right(self) -> None:
+        for member, expected in (
+            ({"status": "creator"}, True),
+            ({"status": "administrator", "can_delete_messages": True}, True),
+            ({"status": "administrator", "can_delete_messages": False}, False),
+            ({"status": "member"}, False),
+        ):
+            client = TelegramClient("test")
+            with self.subTest(member=member), patch.object(
+                client, "_call", return_value=member
+            ) as call:
+                self.assertEqual(client.is_admin(chat_id=GROUP, user_id=5), expected)
+                self.assertEqual(call.call_args.args[1], {"chat_id": GROUP, "user_id": 5})
 
     def test_sf_reply_mentions_a_username(self) -> None:
         client = TelegramClient("test")
