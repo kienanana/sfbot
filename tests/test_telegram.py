@@ -28,6 +28,10 @@ class FakeTelegramClient:
         self.sent: list[tuple[int, str]] = []
         self.sent_entities: list[list[dict[str, object]] | None] = []
         self.reactions: list[tuple[int, int, str]] = []
+        self.can_delete = True
+
+    def can_delete_messages(self, *, chat_id: int) -> bool:
+        return self.can_delete
 
     def send_sf_reply(
         self,
@@ -107,6 +111,20 @@ class BlockedDirectMessageClient(FakeTelegramClient):
         super().send_message(chat_id=chat_id, text=text)
 
 
+class FakeCleaner:
+    def __init__(self, *, busy: bool = False) -> None:
+        self.busy = busy
+        self.sweeps: list[tuple[int, str, int]] = []
+        self.reports: list[object] = []
+
+    def start(self, *, chat_id: int, needle: str, last_message_id: int, report) -> bool:
+        if self.busy:
+            return False
+        self.sweeps.append((chat_id, needle, last_message_id))
+        self.reports.append(report)
+        return True
+
+
 def command_entity(text: str) -> list[dict[str, object]]:
     return [{"type": "bot_command", "offset": 0, "length": len(text.split()[0])}]
 
@@ -137,6 +155,7 @@ class HandleMessageTests(unittest.TestCase):
         board_chat_id: int | None = GROUP,
         action_word: str | None = None,
         nicknames: dict[int, str] | None = None,
+        cleaner: FakeCleaner | None = None,
     ) -> None:
         handle_message(
             message,  # type: ignore[arg-type]
@@ -147,7 +166,88 @@ class HandleMessageTests(unittest.TestCase):
             board_chat_id=board_chat_id,
             action_word=action_word,
             nicknames={} if nicknames is None else nicknames,
+            cleaner=cleaner,  # type: ignore[arg-type]
         )
+
+    def cleanup(
+        self,
+        text: str,
+        *,
+        cleaner: FakeCleaner | None,
+        chat_type: str = "supergroup",
+    ) -> None:
+        self.handle(
+            {
+                "chat": {"id": GROUP, "type": chat_type},
+                "message_id": 900,
+                "date": 2_000_000_000,
+                "from": {"id": 5, "first_name": "Alice"},
+                "text": text,
+                "entities": command_entity(text),
+            },
+            cleaner=cleaner,
+        )
+
+    def test_cleanup_sweeps_up_to_the_command_and_acknowledges_it(self) -> None:
+        cleaner = FakeCleaner()
+        self.cleanup("/cleanup@sfbot  Foo Bar ", cleaner=cleaner)
+        self.assertEqual(cleaner.sweeps, [(GROUP, "Foo Bar", 900)])
+        self.assertEqual(self.client.reactions, [(GROUP, 900, "\N{THUMBS UP SIGN}")])
+        self.assertEqual(self.client.sent, [])
+
+        cleaner.reports[0]("Cleaned up 3 messages.")
+        self.assertEqual(self.client.sent, [(GROUP, "Cleaned up 3 messages.")])
+
+    def test_cleanup_refuses_a_missing_or_short_argument(self) -> None:
+        cleaner = FakeCleaner()
+        for text in ("/cleanup", "/cleanup   ", "/cleanup ab"):
+            with self.subTest(text=text):
+                self.cleanup(text, cleaner=cleaner)
+        self.assertEqual(cleaner.sweeps, [])
+        self.assertEqual(
+            self.client.sent,
+            [(GROUP, "Usage: /cleanup <text>, with at least 3 characters.")] * 3,
+        )
+
+    def test_cleanup_reports_a_sweep_already_running(self) -> None:
+        self.cleanup("/cleanup foo", cleaner=FakeCleaner(busy=True))
+        self.assertEqual(self.client.sent, [(GROUP, "A cleanup is already running.")])
+        self.assertEqual(self.client.reactions, [])
+
+    def test_cleanup_is_ignored_outside_a_supergroup(self) -> None:
+        cleaner = FakeCleaner()
+        for chat_type in ("private", "group"):
+            with self.subTest(chat_type=chat_type):
+                self.cleanup("/cleanup foo", cleaner=cleaner, chat_type=chat_type)
+        self.assertEqual(cleaner.sweeps, [])
+        self.assertEqual(self.client.sent, [])
+
+    def test_cleanup_lists_what_setup_is_missing(self) -> None:
+        cases = (
+            (None, True, "❌", "✅"),
+            (FakeCleaner(), False, "✅", "❌"),
+            (None, False, "❌", "❌"),
+        )
+        for cleaner, can_delete, credentials, admin in cases:
+            with self.subTest(configured=cleaner is not None, can_delete=can_delete):
+                self.client.sent.clear()
+                self.client.can_delete = can_delete
+                self.cleanup("/cleanup foo", cleaner=cleaner)
+                self.assertEqual(
+                    self.client.sent,
+                    [
+                        (
+                            GROUP,
+                            "/cleanup isn't set up yet:\n"
+                            f"{credentials} TELEGRAM_API_ID and TELEGRAM_API_HASH"
+                            " are set in .env\n"
+                            f"{admin} I'm a group admin allowed to delete messages",
+                        )
+                    ],
+                )
+                if cleaner is not None:
+                    self.assertEqual(cleaner.sweeps, [])
+        self.assertEqual(self.client.reactions, [])
 
     def dm(
         self,
@@ -1043,6 +1143,22 @@ class RunPollingTests(unittest.TestCase):
 
 
 class TelegramClientTests(unittest.TestCase):
+    def test_can_delete_messages_needs_the_admin_right(self) -> None:
+        cases = (
+            ({"status": "administrator", "can_delete_messages": True}, True),
+            ({"status": "administrator", "can_delete_messages": False}, False),
+            ({"status": "member"}, False),
+        )
+        for member, expected in cases:
+            client = TelegramClient("test")
+            with self.subTest(member=member), patch.object(
+                client, "_call", side_effect=[{"id": 42}, member]
+            ) as call:
+                self.assertEqual(client.can_delete_messages(chat_id=GROUP), expected)
+                self.assertEqual(
+                    call.call_args.args[1], {"chat_id": GROUP, "user_id": 42}
+                )
+
     def test_sf_reply_mentions_a_username(self) -> None:
         client = TelegramClient("test")
         with patch.object(client, "_call") as call:

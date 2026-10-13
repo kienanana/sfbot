@@ -15,6 +15,7 @@ from types import MappingProxyType
 from typing import Any
 
 from .cache import DuplicateCache
+from .cleanup import MIN_NEEDLE_LENGTH, Cleaner
 from .games import GAMES, expected_puzzle, parse_result
 from .leaderboard import (
     GameStandings,
@@ -44,7 +45,9 @@ _CHAD_COMMAND = "/chad"
 _CHUD_COMMAND = "/chud"
 _DAILY_COMMAND = "/daily"
 _OVERALL_COMMAND = "/overall"
+_CLEANUP_COMMAND = "/cleanup"
 _ACKNOWLEDGEMENT = "\N{THUMBS UP SIGN}"
+_CHECK = {True: "\N{WHITE HEAVY CHECK MARK}", False: "\N{CROSS MARK}"}
 _UNKNOWN_SENDER = (
     "I don't have you on the group roster yet. Say anything in the group chat,"
     " then send this again."
@@ -173,6 +176,17 @@ class TelegramClient:
                 "reaction": [{"type": "emoji", "emoji": emoji}],
             },
             timeout=20,
+        )
+
+    def can_delete_messages(self, *, chat_id: int) -> bool:
+        """Return whether the bot may delete other people's messages in a chat."""
+
+        me = self._call("getMe", {}, timeout=20)
+        member = self._call(
+            "getChatMember", {"chat_id": chat_id, "user_id": me["id"]}, timeout=20
+        )
+        return member.get("status") == "administrator" and bool(
+            member.get("can_delete_messages")
         )
 
 
@@ -457,6 +471,7 @@ def handle_message(
     board_chat_id: int | None,
     action_word: str | None = None,
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
+    cleaner: Cleaner | None = None,
 ) -> None:
     chat = message.get("chat")
     if not isinstance(chat, Mapping) or not isinstance(chat.get("id"), int):
@@ -484,6 +499,54 @@ def handle_message(
     if command == _GAMES_COMMAND:
         text, entities = _games_message()
         client.send_message(chat_id=chat_id, text=text, entities=entities)
+        return
+
+    if command == _CLEANUP_COMMAND:
+        # Only a supergroup numbers its messages per chat, which is what lets
+        # the sweep walk the whole history by ID.
+        if chat.get("type") != "supergroup":
+            return
+        can_delete = client.can_delete_messages(chat_id=chat_id)
+        if cleaner is None or not can_delete:
+            # Both lines are always shown so the chat can see what is left.
+            client.send_message(
+                chat_id=chat_id,
+                text="\n".join(
+                    [
+                        "/cleanup isn't set up yet:",
+                        f"{_CHECK[cleaner is not None]} TELEGRAM_API_ID and"
+                        " TELEGRAM_API_HASH are set in .env",
+                        f"{_CHECK[can_delete]} I'm a group admin allowed to"
+                        " delete messages",
+                    ]
+                ),
+            )
+            return
+        # Everything after the command token, which may carry an @botname.
+        needle = "".join(_message_body(message).split(maxsplit=1)[1:]).strip()
+        if len(needle) < MIN_NEEDLE_LENGTH:
+            client.send_message(
+                chat_id=chat_id,
+                text=(
+                    "Usage: /cleanup <text>, with at least"
+                    f" {MIN_NEEDLE_LENGTH} characters."
+                ),
+            )
+            return
+        # The command is the newest message and contains the text itself, so
+        # the sweep ends by deleting it. The reports never repeat the text.
+        started = cleaner.start(
+            chat_id=chat_id,
+            needle=needle,
+            last_message_id=message_id,
+            report=lambda text: client.send_message(chat_id=chat_id, text=text),
+        )
+        if started:
+            client.set_message_reaction(
+                chat_id=chat_id, message_id=message_id, emoji=_ACKNOWLEDGEMENT
+            )
+        else:
+            client.send_message(chat_id=chat_id, text="A cleanup is already running.")
         return
 
     if command in (
@@ -803,6 +866,7 @@ def run_polling(
     post_minute: int | None = None,
     action_word: str | None = None,
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
+    cleaner: Cleaner | None = None,
 ) -> None:
     offset: int | None = None
     poll_backoff = 1
@@ -870,6 +934,7 @@ def run_polling(
                             board_chat_id=board_chat_id,
                             action_word=action_word,
                             nicknames=nicknames,
+                            cleaner=cleaner,
                         )
                     except request_errors as error:
                         transient = not isinstance(error, TelegramAPIError) or (

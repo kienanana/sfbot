@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from .cache import DuplicateCache
+from .cleanup import Cleaner
 from .leaderboard import LeaderboardStore
 from .telegram import TelegramClient, run_polling
 from .times import parse_daily_time
@@ -89,6 +90,28 @@ def _nicknames() -> dict[int, str]:
     return nicknames
 
 
+def _cleaner(token: str, database_path: Path) -> Cleaner | None:
+    """Return the /cleanup history sweeper, or None when unconfigured."""
+
+    api_id = os.environ.get("TELEGRAM_API_ID", "").strip()
+    api_hash = os.environ.get("TELEGRAM_API_HASH", "").strip()
+    if not api_id and not api_hash:
+        return None
+    if not api_id or not api_hash:
+        raise SystemExit("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set together")
+    try:
+        numeric_id = int(api_id)
+    except ValueError as error:
+        raise SystemExit("TELEGRAM_API_ID must be an integer") from error
+    # Kept beside the database so the same volume persists both.
+    return Cleaner(
+        api_id=numeric_id,
+        api_hash=api_hash,
+        token=token,
+        session_path=database_path.with_suffix(".session"),
+    )
+
+
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -106,6 +129,7 @@ def main() -> None:
     action_word = _action_word()
     nicknames = _nicknames()
     database_path = Path(os.environ.get("SFBOT_DB_PATH", "data/sfbot.db"))
+    cleaner = _cleaner(token, database_path)
 
     if board_chat_id is None:
         logging.getLogger(__name__).warning(
@@ -129,6 +153,7 @@ def main() -> None:
             post_minute=post_minute,
             action_word=action_word,
             nicknames=nicknames,
+            cleaner=cleaner,
         )
 
 

@@ -61,6 +61,44 @@ would name them today. A day posted before that was recorded has only the
 message it sent, so the names in it are swapped for nicknames where they still
 belong to one player of that day.
 
+## Cleanup
+
+`/cleanup <text>` deletes every message in the group whose text or caption
+contains `<text>`, ignoring case, all the way back to the group's first message.
+`/cleanup nuke` removes `Nuke`, `NUKED`, and `/NukeBob` alike, along with the
+command itself. The text must be at least 3 characters, anyone in the group can
+run it, and deletion cannot be undone.
+
+The bot reacts 👍 when a sweep starts and posts `Cleaned up N messages.` when it
+ends; neither repeats the text. One sweep runs at a time, in the background, so
+links, results, and the daily post keep working meanwhile.
+
+The Bot API cannot read a chat's history, so the sweep logs in over MTProto with
+[Telethon](https://github.com/LonamiWebs/Telethon) using the same bot token.
+Even there a bot can neither list nor search history, but it can fetch messages
+by ID, and a supergroup numbers its messages from 1 — so the sweep fetches every
+ID up to the command's own, 100 at a time. That needs three things:
+
+- `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` in `.env`, created for free under
+  "API development tools" at <https://my.telegram.org>. They identify the app,
+  not a person, and grant no access on their own, but keep them out of Git like
+  the token.
+- The bot must be an admin with the right to delete messages.
+- The group must be a supergroup; the command is ignored anywhere else.
+
+Until the first two are done, `/cleanup` answers with a checklist instead of
+sweeping, marking each ✅ or ❌:
+
+```
+/cleanup isn't set up yet:
+❌ TELEGRAM_API_ID and TELEGRAM_API_HASH are set in .env
+✅ I'm a group admin allowed to delete messages
+```
+
+Telegram rate-limits fetching by ID, and the sweep sleeps through each limit, so
+expect very roughly an hour per 35,000 messages of history. The login is kept in
+`sfbot.session` beside the database; it is as sensitive as the token.
+
 ## Architecture
 
 One process, one SQLite file, no inbound network. Commands, repeated links, and
@@ -122,12 +160,15 @@ TELEGRAM_BOT_TOKEN=replace-with-the-real-token
 SFBOT_LEADERBOARD_CHAT_ID=-1001234567890
 SFBOT_ACTION_WORD=Nuke
 SFBOT_NICKNAMES=123456789:Juan,987654321:Nikki
+TELEGRAM_API_ID=1234567
+TELEGRAM_API_HASH=replace-with-the-real-hash
 ```
 
 `SFBOT_LEADERBOARD_CHAT_ID` is the group the daily leaderboard posts to; see
 [Finding the group's chat ID](#finding-the-groups-chat-id). Leave it out to run
 link deduplication and `/games` without the leaderboard. `SFBOT_ACTION_WORD` is
 the repeat-poster callout verb; leave it out to send only the `sf` mention.
+`TELEGRAM_API_ID` and `TELEGRAM_API_HASH` enable [`/cleanup`](#cleanup).
 
 `compose.yaml` passes each of these into the container by name, so a new
 variable has to be added there as well as to `.env`.
@@ -137,8 +178,9 @@ Telegram permits only one active `getUpdates` poller per bot.
 
 ## Run locally
 
-Python 3.11 or newer and Make are required. The bot has no third-party runtime
-dependencies. From the repository root, run:
+Python 3.11 or newer and Make are required. The only third-party dependency is
+Telethon, and only `/cleanup` uses it: install it with `python3.11 -m pip install .`
+if `TELEGRAM_API_ID` is set, and skip it otherwise. From the repository root, run:
 
 ```sh
 make run
@@ -258,6 +300,7 @@ that day, unless overridden by a nickname.
 | `/chad`, `/chud` | The saved announcement for today, or a note that it is not decided yet |
 | `/daily` | Today's saved final ranking and placement scores after the daily post |
 | `/overall` | Each participant's total CHADs and CHUDs, plus 🔥 CHAD or 💩 CHUD streaks only while active |
+| `/cleanup <text>` | Deletes every message containing the text; see [Cleanup](#cleanup) |
 
 Commands reply where you ask; a DM check stays private. In groups, standings,
 announcements, and submissions are available only in the configured leaderboard
@@ -314,6 +357,8 @@ not match, and add cases to `tests/test_games.py` from real share text.
 | `SFBOT_LEADERBOARD_AT` | `21:00` | Local time of the daily post; `off` for `/leaderboard` only |
 | `SFBOT_ACTION_WORD` | Unset | Verb for the repeat-poster callout; unset sends only the `sf` mention |
 | `SFBOT_NICKNAMES` | Unset | `user_id:nickname` pairs, comma separated; overrides Telegram names |
+| `TELEGRAM_API_ID` | Unset | MTProto app ID for `/cleanup`; unset makes the command answer with a setup checklist |
+| `TELEGRAM_API_HASH` | Unset | MTProto app hash, set together with `TELEGRAM_API_ID` |
 
 ## Reliability and storage
 
