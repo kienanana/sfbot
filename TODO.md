@@ -91,8 +91,5 @@ retention window. Deployment checks below remain unverified by local tests.
       chat isolation, deleted origins, and cache survival across restart.
 - [ ] Smoke-test member/stranger DMs, first-submission locking, group reactions,
       and all four commands, including tied winners and nickname overrides.
-- [ ] Smoke-test `/cleanup` on the live group: the MTProto bot login beside the
-      running poller, deleting other members' and older-than-48-hour messages,
-      the real pace of a full sweep, and the missing-admin-rights failure.
 - [ ] Verify 20:00 SGT reminders and 21:00 boards on the live group, including
       post-restart behavior and recovery after a temporary network outage.

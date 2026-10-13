@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A Telegram bot for duplicate links and daily game leaderboards"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["telethon==1.45.0"]
+dependencies = []
 
 [project.scripts]
 sfbot = "sfbot.__main__:main"
