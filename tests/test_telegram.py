@@ -1218,7 +1218,13 @@ class PostDueLeaderboardTests(unittest.TestCase):
         self.store.close()
         self.temp_dir.cleanup()
 
-    def post(self, now: int, *, nicknames: dict[int, str] | None = None) -> None:
+    def post(
+        self,
+        now: int,
+        *,
+        nicknames: dict[int, str] | None = None,
+        absent_chud_user_id: int | None = None,
+    ) -> None:
         post_due_leaderboard(
             self.client,  # type: ignore[arg-type]
             self.store,
@@ -1227,6 +1233,7 @@ class PostDueLeaderboardTests(unittest.TestCase):
             post_minute=21 * 60,
             now=now,
             nicknames={} if nicknames is None else nicknames,
+            absent_chud_user_id=absent_chud_user_id,
         )
 
     def test_the_group_is_posted_to_once_per_day(self) -> None:
@@ -1277,6 +1284,61 @@ class PostDueLeaderboardTests(unittest.TestCase):
         self.assertIn("Alice is the CHAD of the day!", self.client.sent[1][1])
         self.assertNotIn("🔥", self.client.sent[1][1])
         self.assertNotIn("💩", self.client.sent[2][1])
+
+    def test_a_player_who_sat_the_day_out_takes_the_chud_title(self) -> None:
+        for user_id, name, text in (
+            (5, "Alice", "Wordle 4,351 2/6"),
+            (6, "Bob", "Wordle 4,351 5/6"),
+        ):
+            result = parse_result(text)
+            assert result is not None
+            self.store.record(
+                chat_id=GROUP,
+                local_date="2033-05-18",
+                user_id=user_id,
+                display_name=name,
+                result=result,
+                submitted_at=2_000_000_000 + user_id,
+            )
+
+        self.post(2_000_035_800, absent_chud_user_id=8, nicknames={8: "Diddy"})
+
+        # Bob scored worst, but the title goes to whoever played nothing.
+        self.assertEqual(
+            self.client.sent[2],
+            (GROUP, "🚽 Ding ding ding! Diddy is the CHUD of the day!"),
+        )
+        self.assertIn("Alice is the CHAD of the day!", self.client.sent[1][1])
+        self.assertIn("— 🚽 Diddy — played nothing", self.client.sent[3][1])
+        chud = self.store.posted_announcements(
+            chat_id=GROUP, local_date="2033-05-18"
+        )
+        assert chud is not None
+        self.assertEqual(chud[1].winners, ((8, "Diddy"),))
+
+    def test_a_configured_player_who_played_is_judged_on_their_scores(self) -> None:
+        for user_id, name, text in (
+            (5, "Alice", "Wordle 4,351 2/6"),
+            (6, "Bob", "Wordle 4,351 5/6"),
+        ):
+            result = parse_result(text)
+            assert result is not None
+            self.store.record(
+                chat_id=GROUP,
+                local_date="2033-05-18",
+                user_id=user_id,
+                display_name=name,
+                result=result,
+                submitted_at=2_000_000_000 + user_id,
+            )
+
+        self.post(2_000_035_800, absent_chud_user_id=5, nicknames={5: "Alice"})
+
+        self.assertEqual(
+            self.client.sent[2],
+            (GROUP, "🚽 Ding ding ding! Bob is the CHUD of the day!"),
+        )
+        self.assertNotIn("played nothing", self.client.sent[3][1])
 
     def test_chad_and_chud_posts_acknowledge_consecutive_titles(self) -> None:
         self.store.mark_posted(

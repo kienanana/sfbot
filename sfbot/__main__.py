@@ -89,6 +89,21 @@ def _nicknames() -> dict[int, str]:
     return nicknames
 
 
+def _absent_chud_user_id() -> int | None:
+    """Return the user who takes the CHUD title outright on a day they played nothing.
+
+    Unset leaves the title to the usual worst-placement rule.
+    """
+
+    raw = os.environ.get("SFBOT_ABSENT_CHUD_USER_ID", "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as error:
+        raise SystemExit("SFBOT_ABSENT_CHUD_USER_ID must be an integer") from error
+
+
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
@@ -105,6 +120,7 @@ def main() -> None:
     post_minute = _post_minute()
     action_word = _action_word()
     nicknames = _nicknames()
+    absent_chud_user_id = _absent_chud_user_id()
     database_path = Path(os.environ.get("SFBOT_DB_PATH", "data/sfbot.db"))
 
     if board_chat_id is None:
@@ -129,6 +145,7 @@ def main() -> None:
             post_minute=post_minute,
             action_word=action_word,
             nicknames=nicknames,
+            absent_chud_user_id=absent_chud_user_id,
         )
 
 

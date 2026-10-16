@@ -11,6 +11,7 @@ services:
       SFBOT_LEADERBOARD_AT: "21:00"
       SFBOT_ACTION_WORD: ${SFBOT_ACTION_WORD:-}
       SFBOT_NICKNAMES: ${SFBOT_NICKNAMES:-}
+      SFBOT_ABSENT_CHUD_USER_ID: ${SFBOT_ABSENT_CHUD_USER_ID:-}
     volumes:
       - sfbot-data:/data
 
