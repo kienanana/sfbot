@@ -77,6 +77,21 @@ class ParseResultTests(unittest.TestCase):
         self.assertEqual(near_perfect.rank_key, 1.4)
         self.assertLess(near_perfect.rank_key, result.rank_key)
 
+    def test_fermi_share_text_with_arrows_keeps_question_directions(self) -> None:
+        text = (
+            "Fermi · No. 106\n"
+            "01 ↑ 1.14×\n02 ↓ 1.45×\n03 ↓ 1.07×\n"
+            "─────────\n"
+            "1.21× score · top 9%\n"
+            "<https://fermi.gg/s/daily>"
+        )
+        result = parse_result(text)
+        assert result is not None
+        self.assertEqual(result.game, "Fermi")
+        self.assertEqual(result.puzzle_id, "106")
+        self.assertEqual(result.score, "1.21× (↑ 1.14×, ↓ 1.45×, ↓ 1.07×)")
+        self.assertEqual(result.rank_key, 1.21)
+
     def test_connections_counts_mistakes_from_the_grid(self) -> None:
         yellow, green, blue, purple = (
             "\U0001f7e8",

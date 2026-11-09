@@ -27,7 +27,9 @@ _KRILLION = re.compile(
 _FERMI_PUZZLE = re.compile(rf"(?im)^{_BLANK}*fermi\b[^\n\d]*(\d+){_BLANK}*$")
 _FERMI_SCORE = re.compile(rf"(?im)^{_BLANK}*([\d,.]+)×{_BLANK}*score\b")
 # Each question is a numbered line carrying its own multiplier, above the total.
-_FERMI_QUESTION = re.compile(rf"(?m)^{_BLANK}*\d+{_BLANK}+([\d,.]+)×{_BLANK}*$")
+_FERMI_QUESTION = re.compile(
+    rf"(?m)^{_BLANK}*\d+{_BLANK}+(?:([↑↓]){_BLANK}*)?([\d,.]+)×{_BLANK}*$"
+)
 _CONNECTIONS = re.compile(
     rf"(?im)^{_BLANK}*connections{_BLANK}*\n{_BLANK}*puzzle{_BLANK}*#(\d+){_BLANK}*$"
 )
@@ -119,7 +121,10 @@ def _parse_fermi(text: str) -> ParsedResult | None:
         return None
 
     questions = _FERMI_QUESTION.findall(text)
-    breakdown = ", ".join(f"{question}×" for question in questions)
+    breakdown = ", ".join(
+        f"{arrow} {question}×" if arrow else f"{question}×"
+        for arrow, question in questions
+    )
     return ParsedResult(
         game="Fermi",
         puzzle_id=puzzle.group(1),
