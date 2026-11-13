@@ -29,7 +29,7 @@ _FERMI_PUZZLE = re.compile(rf"(?im)^{_BLANK}*fermi\b[^\n\d]*(\d+){_BLANK}*$")
 _FERMI_SCORE = re.compile(rf"(?im)^{_BLANK}*([\d,.]+)×{_BLANK}*score\b")
 # Each question is a numbered line carrying its own multiplier, above the total.
 _FERMI_QUESTION = re.compile(
-    rf"(?m)^{_BLANK}*\d+{_BLANK}+(?:([↑↓]){_BLANK}*)?([\d,.]+)×{_BLANK}*$"
+    rf"(?m)^{_BLANK}*\d+{_BLANK}+(?:([↑↓=]){_BLANK}*)?([\d,.]+)×{_BLANK}*$"
 )
 _CONNECTIONS = re.compile(
     rf"(?im)^{_BLANK}*connections{_BLANK}*\n{_BLANK}*puzzle{_BLANK}*#(\d+){_BLANK}*$"

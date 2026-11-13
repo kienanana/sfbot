@@ -92,6 +92,21 @@ class ParseResultTests(unittest.TestCase):
         self.assertEqual(result.score, "1.21× (↑ 1.14×, ↓ 1.45×, ↓ 1.07×)")
         self.assertEqual(result.rank_key, 1.21)
 
+    def test_fermi_share_text_includes_exact_answer(self) -> None:
+        text = (
+            "Fermi · No. 110\n"
+            "01 ↑ 1.76×\n02 ↓ 3.78×\n03 = 1.00×\n"
+            "─────────\n"
+            "1.88× score · top 7%\n"
+            "<https://fermi.gg/s/daily>"
+        )
+        result = parse_result(text)
+        assert result is not None
+        self.assertEqual(result.game, "Fermi")
+        self.assertEqual(result.puzzle_id, "110")
+        self.assertEqual(result.score, "1.88× (↑ 1.76×, ↓ 3.78×, = 1.00×)")
+        self.assertEqual(result.rank_key, 1.88)
+
     def test_connections_counts_mistakes_from_the_grid(self) -> None:
         yellow, green, blue, purple = (
             "\U0001f7e8",
