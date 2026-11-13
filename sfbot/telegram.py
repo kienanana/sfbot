@@ -32,6 +32,7 @@ from .leaderboard import (
     format_chud_winners,
     format_daily_ranking,
     format_overall_ranking,
+    format_sf_ranking,
     format_standings,
 )
 from .links import extract_tweet_ids
@@ -45,6 +46,7 @@ _CHAD_COMMAND = "/chad"
 _CHUD_COMMAND = "/chud"
 _DAILY_COMMAND = "/daily"
 _OVERALL_COMMAND = "/overall"
+_SF_COMMAND = "/sf"
 _ACKNOWLEDGEMENT = "\N{THUMBS UP SIGN}"
 _UNKNOWN_SENDER = (
     "I don't have you on the group roster yet. Say anything in the group chat,"
@@ -288,6 +290,26 @@ def _send_leaderboard(
     return standings
 
 
+def _send_sf_ranking(
+    client: TelegramClient, store: LeaderboardStore, *, board_chat_id: int,
+    to_chat_id: int, nicknames: Mapping[int, str],
+    updated_user_id: int | None = None,
+) -> None:
+    text = format_sf_ranking(
+        store.sf_ranking(chat_id=board_chat_id, nicknames=nicknames),
+        updated_user_id=updated_user_id,
+    )
+    heading, separator, body = text.partition("\n")
+    entities = None
+    if separator:
+        entities = [{
+            "type": "pre",
+            "offset": _utf16_length(heading + separator),
+            "length": _utf16_length(body),
+        }]
+    client.send_message(chat_id=to_chat_id, text=text, entities=entities)
+
+
 def _record_submission(
     message: Mapping[str, object],
     *,
@@ -487,6 +509,20 @@ def handle_message(
         client.send_message(chat_id=chat_id, text=text, entities=entities)
         return
 
+    if command == _SF_COMMAND:
+        sf_chat_id = board_chat_id if is_private and board_chat_id is not None else chat_id
+        if is_private and board_chat_id is not None and not (
+            sender is not None
+            and store.is_member(chat_id=board_chat_id, user_id=sender[0])
+        ):
+            client.send_message(chat_id=chat_id, text=_UNKNOWN_SENDER)
+            return
+        _send_sf_ranking(
+            client, store, board_chat_id=sf_chat_id,
+            to_chat_id=chat_id, nicknames=nicknames,
+        )
+        return
+
     if command in (
         _LEADERBOARD_COMMAND,
         _CHAD_COMMAND,
@@ -643,11 +679,29 @@ def handle_message(
                 continue
             raise
 
+        updated_user_id = None
+        if sender is not None:
+            raw_name = _sender(message, _NO_NICKNAMES)
+            if raw_name is not None and store.record_sf(
+                chat_id=chat_id,
+                message_id=message_id,
+                tweet_id=tweet_id,
+                user_id=sender[0],
+                display_name=raw_name[1],
+            ):
+                updated_user_id = sender[0]
+
         # The callout names whoever reposted, so it goes to the chat rather than
         # onto the original message it would otherwise seem to be about.
         if action_word and sender is not None:
             for line in _callout(action_word, sender[1]):
                 client.send_message(chat_id=chat_id, text=line)
+
+        if updated_user_id is not None:
+            _send_sf_ranking(
+                client, store, board_chat_id=chat_id, to_chat_id=chat_id,
+                nicknames=nicknames, updated_user_id=updated_user_id,
+            )
 
 
 def post_due_leaderboard(
