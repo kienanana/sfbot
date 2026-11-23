@@ -111,8 +111,8 @@ or turning monthly resets on, keeps the current season until the next month.
 ### Message sets
 
 The callout line and the CHAD and CHUD closing lines are each drawn from a set of lines
-that the group can edit with commands. The same rules apply: anyone in the
-board group can use them, and nobody can from a DM.
+that the group can edit with commands. Anyone in the board group can use them,
+in the group or by DM to the bot; a DM works only for people on the roster.
 
 | Set | Used for |
 | --- | --- |
@@ -127,6 +127,15 @@ board group can use them, and nobody can from a DM.
 | `/lines callout` | List the set's lines, numbered |
 | `/addline callout {name} is off to {word}` | Add a line to the set |
 | `/delline callout 2` | Delete line 2 of the set |
+| `/addline chad @Juan Nice job!` | Add a line to Juan's own CHAD lines |
+| `/lines chud @Juan`, `/delline chud @Juan 1` | List or delete Juan's own CHUD lines |
+| `/names` | List the names each member answers to |
+
+CHAD and CHUD lines can also belong to one person. On a day they win, their own
+lines join the group's in the pool the closing line is drawn from. After `@`,
+use a member's nickname, Telegram name or username, in any case; `/names` lists
+them. A name with spaces is read whole, and a name two people share is refused.
+Someone's own lines start empty and may be deleted down to none.
 
 The bot refuses to delete a set's last line, and refuses callout lines with
 placeholders other than `{name}` and `{word}`. The sets start from the lines in

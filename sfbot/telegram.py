@@ -21,6 +21,7 @@ from .cache import DuplicateCache
 from .games import GAMES, expected_puzzle, parse_result
 from .leaderboard import (
     MESSAGE_SETS,
+    PERSONAL_SETS,
     GameStandings,
     LeaderboardStore,
     PostedAnnouncement,
@@ -60,6 +61,7 @@ _RESET_OVERALL_COMMAND = "/resetoverall"
 _LINES_COMMAND = "/lines"
 _ADD_LINE_COMMAND = "/addline"
 _DELETE_LINE_COMMAND = "/delline"
+_NAMES_COMMAND = "/names"
 _CALLOUT_PLACEHOLDERS = {"name", "word"}
 _OFF = "off"
 _ACKNOWLEDGEMENT = "\N{THUMBS UP SIGN}"
@@ -594,19 +596,102 @@ def _change_setting(
     return f"Duplicate window: {retention_days} days"
 
 
-def _edit_lines(
-    message: Mapping[str, object], command: str, *, store: LeaderboardStore
+def _names(
+    store: LeaderboardStore, board_chat_id: int, nicknames: Mapping[int, str]
+) -> dict[int, list[str]]:
+    """Return every name each group member answers to: nickname, Telegram name,
+    and username, in that order."""
+
+    people: dict[int, list[str]] = {}
+    for user_id, (name, username) in store.member_names(chat_id=board_chat_id).items():
+        labels = [nicknames.get(user_id), name, username]
+        people[user_id] = list(dict.fromkeys(label for label in labels if label))
+    return people
+
+
+def _names_text(
+    store: LeaderboardStore, board_chat_id: int, nicknames: Mapping[int, str]
 ) -> str:
-    """List, add to, or delete from a message set, returning the reply."""
+    rows = []
+    for labels in _names(store, board_chat_id, nicknames).values():
+        if labels:
+            others = ", ".join(labels[1:])
+            rows.append(f"{labels[0]} ({others})" if others else labels[0])
+    if not rows:
+        return "Nobody's on the roster yet."
+    return "Names to use after @ in /lines, /addline and /delline:\n" + "\n".join(
+        sorted(rows, key=str.lower)
+    )
+
+
+def _person(
+    text: str,
+    *,
+    store: LeaderboardStore,
+    board_chat_id: int,
+    nicknames: Mapping[int, str],
+) -> tuple[int, str, str] | str:
+    """Find who an @name at the start of text means, by nickname, Telegram name or
+    username. Returns their ID, the name to show, and the rest of the text, or a
+    reply explaining why nobody matched. The longest matching name wins, so a
+    name with spaces is read whole."""
+
+    lowered = text.lower()
+    matches: dict[int, int] = {}
+    people = _names(store, board_chat_id, nicknames)
+    for user_id, labels in people.items():
+        for label in labels:
+            label = label.lower()
+            if lowered == label or lowered.startswith(label + " "):
+                matches[user_id] = max(matches.get(user_id, 0), len(label))
+    if not matches:
+        return "I don't know who that is. /names lists the names I know."
+    longest = max(matches.values())
+    matched = [user_id for user_id, length in matches.items() if length == longest]
+    if len(matched) > 1:
+        return "That name fits more than one person. /names lists the others to use."
+    user_id = matched[0]
+    return user_id, people[user_id][0], text[longest:].strip()
+
+
+def _edit_lines(
+    message: Mapping[str, object],
+    command: str,
+    *,
+    store: LeaderboardStore,
+    board_chat_id: int,
+    nicknames: Mapping[int, str],
+) -> str:
+    """List, add to, or delete from a message set, returning the reply.
+
+    An @name after chad or chud works on that person's own lines instead.
+    """
 
     parts = _message_body(message).split(maxsplit=2)
     set_name = parts[1].lower() if len(parts) > 1 else ""
     argument = parts[2].strip() if len(parts) > 2 else ""
     if set_name not in MESSAGE_SETS:
-        return f"Name a set: {', '.join(MESSAGE_SETS)}. For example /lines callout."
-    lines = store.message_lines(set_name)
+        return (
+            f"Name a set: {', '.join(MESSAGE_SETS)}. For example /lines callout,"
+            " or /lines chad @name for someone's own lines."
+        )
+    key = label = set_name
+    personal = argument.startswith("@")
+    if personal:
+        if set_name not in PERSONAL_SETS:
+            return f"Only {' and '.join(PERSONAL_SETS)} lines can belong to someone."
+        person = _person(
+            argument[1:], store=store, board_chat_id=board_chat_id, nicknames=nicknames
+        )
+        if isinstance(person, str):
+            return person
+        user_id, name, argument = person
+        key, label = f"{set_name}:{user_id}", f"{name}'s {set_name} lines"
+    lines = store.message_lines(key)
 
     if command == _LINES_COMMAND:
+        if not lines:
+            return f"No {label} yet."
         return "\n".join(f"{number}. {line}" for number, line in enumerate(lines, 1))
 
     if command == _ADD_LINE_COMMAND:
@@ -615,26 +700,35 @@ def _edit_lines(
         unknown = set(re.findall(r"\{([^{}]*)\}", argument)) - _CALLOUT_PLACEHOLDERS
         if set_name == "callout" and unknown:
             return "A callout line can use only {name} and {word}."
-        store.add_message_line(set_name, argument)
-        return f"Added to {set_name}: {argument}"
+        store.add_message_line(key, argument)
+        return f"Added to {label}: {argument}"
 
     if not argument.isdigit() or not 1 <= int(argument) <= len(lines):
-        return f"Use a line number from /lines {set_name}."
-    if len(lines) == 1:
+        return f"Use a line number from /lines {set_name}{' @name' if personal else ''}."
+    # Someone's own lines can run out; the group's always need one to draw on.
+    if len(lines) == 1 and not personal:
         return f"That's the last line in {set_name}. Add another before deleting it."
-    store.delete_message_line(set_name, int(argument))
-    return f"Deleted from {set_name}: {lines[int(argument) - 1]}"
+    store.delete_message_line(key, int(argument))
+    return f"Deleted from {label}: {lines[int(argument) - 1]}"
 
 
-def _chad_line(store: LeaderboardStore, chat_id: int, day: str, winners: int) -> str:
+def _chad_line(
+    store: LeaderboardStore, chat_id: int, day: str, winners: Sequence[Winner]
+) -> str:
     lines = store.message_lines("chad") + store.message_lines(
-        "chad-solo" if winners == 1 else "chad-group"
+        "chad-solo" if len(winners) == 1 else "chad-group"
     )
+    for user_id, _ in winners:
+        lines += store.message_lines(f"chad:{user_id}")
     return lines[_chad_variation(chat_id, day) % len(lines)]
 
 
-def _chud_line(store: LeaderboardStore, chat_id: int, day: str) -> str:
+def _chud_line(
+    store: LeaderboardStore, chat_id: int, day: str, winners: Sequence[Winner]
+) -> str:
     lines = store.message_lines("chud")
+    for user_id, _ in winners:
+        lines += store.message_lines(f"chud:{user_id}")
     return lines[_chad_variation(chat_id, day) % len(lines)]
 
 
@@ -752,7 +846,16 @@ def handle_message(
     # direct message be trusted. Group Privacy is off, so ordinary chatter counts
     # and nobody has to post a result in the group to get on the roster.
     if is_board_group and sender is not None:
-        store.remember_member(chat_id=board_chat_id, user_id=sender[0], seen_at=seen_at)
+        raw = message["from"]
+        assert isinstance(raw, Mapping)
+        name, username = raw.get("first_name"), raw.get("username")
+        store.remember_member(
+            chat_id=board_chat_id,
+            user_id=sender[0],
+            seen_at=seen_at,
+            name=name if isinstance(name, str) and name else None,
+            username=username if isinstance(username, str) and username else None,
+        )
 
     command = _leading_command(message)
     if command == _GAMES_COMMAND:
@@ -774,6 +877,29 @@ def handle_message(
         )
         return
 
+    if command in (_LINES_COMMAND, _ADD_LINE_COMMAND, _DELETE_LINE_COMMAND, _NAMES_COMMAND):
+        # Lines and names work by DM too, for anyone on the group's roster.
+        if board_chat_id is None or not (is_private or is_board_group):
+            return
+        if is_private and not (
+            sender is not None
+            and store.is_member(chat_id=board_chat_id, user_id=sender[0])
+        ):
+            client.send_message(chat_id=chat_id, text=_UNKNOWN_SENDER)
+            return
+        if command == _NAMES_COMMAND:
+            text = _names_text(store, board_chat_id, nicknames)
+        else:
+            text = _edit_lines(
+                message,
+                command,
+                store=store,
+                board_chat_id=board_chat_id,
+                nicknames=nicknames,
+            )
+        client.send_message(chat_id=chat_id, text=text)
+        return
+
     if command in (
         _SETTINGS_COMMAND,
         _ACTION_WORD_COMMAND,
@@ -782,17 +908,10 @@ def handle_message(
         _RETENTION_COMMAND,
         _MONTHLY_RESET_COMMAND,
         _RESET_OVERALL_COMMAND,
-        _LINES_COMMAND,
-        _ADD_LINE_COMMAND,
-        _DELETE_LINE_COMMAND,
     ):
         # Changes happen in the group only, so everyone sees them.
         if is_private:
             client.send_message(chat_id=chat_id, text="Change settings in the group chat.")
-        elif command in (_LINES_COMMAND, _ADD_LINE_COMMAND, _DELETE_LINE_COMMAND):
-            if is_board_group:
-                text = _edit_lines(message, command, store=store)
-                client.send_message(chat_id=chat_id, text=text)
         elif command == _RESET_OVERALL_COMMAND:
             if is_board_group:
                 # A day already posted stays in the season it was posted in.
@@ -1033,8 +1152,8 @@ def post_due_leaderboard(
     )
     chads = chad_winners(recorded)
     chuds = chud_winners(recorded)
-    chad_line = _chad_line(store, board_chat_id, day, len(chads)) if chads else None
-    chud_line = _chud_line(store, board_chat_id, day) if chuds else None
+    chad_line = _chad_line(store, board_chat_id, day, chads) if chads else None
+    chud_line = _chud_line(store, board_chat_id, day, chuds) if chuds else None
     chad = format_chad_winners(chads, nicknames=nicknames, line=chad_line)
     chud = format_chud_winners(chuds, nicknames=nicknames, line=chud_line)
     chad = _with_streaks(

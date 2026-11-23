@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -7,7 +8,11 @@ from sfbot.cache import DuplicateCache
 from sfbot.games import parse_result
 from sfbot.leaderboard import LeaderboardStore
 from sfbot.telegram import (
+    _UNKNOWN_SENDER,
     TelegramAPIError,
+    _chad_line,
+    _chad_variation,
+    _chud_line,
     TelegramClient,
     handle_message,
     post_due_leaderboard,
@@ -407,6 +412,91 @@ class HandleMessageTests(unittest.TestCase):
             self.store.message_lines("callout"),
             ["Uh oh! Looks like {name}'s being *Sent to {word}*"],
         )
+
+    def test_personal_lines_take_a_nickname_name_or_username(self) -> None:
+        self.store.remember_member(
+            chat_id=GROUP, user_id=6, seen_at=1, name="Aditya Kumar", username="adi"
+        )
+        self.assertEqual(
+            self.command("/addline chad @Aditya Kumar this one isn't diddyflation!"),
+            "Added to Aditya Kumar's chad lines: this one isn't diddyflation!",
+        )
+        self.assertEqual(
+            self.command("/addline CHAD @ADI hi", chat={"id": DM, "type": "private"}),
+            "Added to Aditya Kumar's chad lines: hi",
+        )
+        self.assertEqual(
+            self.command("/lines chad @Diddy", nicknames={6: "Diddy"}),
+            "1. this one isn't diddyflation!\n2. hi",
+        )
+        self.assertNotIn("hi", self.store.message_lines("chad"))
+        self.assertEqual(
+            self.command("/delline chad @adi 2"), "Deleted from Aditya Kumar's chad lines: hi"
+        )
+        # Someone's own lines may run out, unlike the group's.
+        self.assertTrue(self.command("/delline chad @adi 1").startswith("Deleted"))
+        self.assertEqual(self.command("/lines chad @adi"), "No Aditya Kumar's chad lines yet.")
+
+    def test_the_longest_matching_name_wins(self) -> None:
+        self.store.remember_member(chat_id=GROUP, user_id=6, seen_at=1, name="Ali")
+        self.store.remember_member(chat_id=GROUP, user_id=7, seen_at=1, name="Ali Baba")
+        self.command("/addline chud @Ali Baba open sesame")
+        self.assertEqual(self.store.message_lines("chud:7"), ["open sesame"])
+        self.command("/addline chud @ali Babar the elephant")
+        self.assertEqual(self.store.message_lines("chud:6"), ["Babar the elephant"])
+
+    def test_invalid_personal_line_commands_are_refused(self) -> None:
+        self.store.remember_member(chat_id=GROUP, user_id=6, seen_at=1, name="Sam")
+        self.store.remember_member(chat_id=GROUP, user_id=7, seen_at=1, username="sam")
+        for text, reply in (
+            ("/addline callout @Sam hi", "Only chad and chud lines"),
+            ("/lines chad @nobody", "I don't know who that is"),
+            ("/lines chad @sam", "That name fits more than one person"),
+            ("/delline chud @Alice 1", "Use a line number from /lines chud @name"),
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(self.command(text).startswith(reply))
+
+    def test_names_lists_every_name_a_member_answers_to(self) -> None:
+        self.store.remember_member(
+            chat_id=GROUP, user_id=6, seen_at=1, name="Aditya", username="adi"
+        )
+        self.assertEqual(
+            self.command("/names", nicknames={6: "Diddy"}),
+            "Names to use after @ in /lines, /addline and /delline:\n"
+            "Alice\nDiddy (Aditya, adi)",
+        )
+
+    def test_line_commands_by_dm_need_the_group_roster(self) -> None:
+        self.handle({
+            "chat": {"id": DM, "type": "private"},
+            "message_id": 50, "date": 2_000_000_000,
+            "from": {"id": 9, "first_name": "Stranger"},
+            "text": "/names", "entities": command_entity("/names"),
+        })
+        self.assertEqual(self.client.sent[-1][1], _UNKNOWN_SENDER)
+
+    def test_a_winners_own_lines_join_the_pool(self) -> None:
+        self.store.add_message_line("chad:5", "Nice job Claude!")
+        self.store.add_message_line("chud:5", "this one isn't diddyflation!")
+        for line, pool in (
+            (_chad_line, self.store.message_lines("chad") + self.store.message_lines("chad-solo")),
+            (_chud_line, self.store.message_lines("chud")),
+        ):
+            size = len(pool) + 1
+            # The first day whose variation lands on the pool's last line, the
+            # winner's own.
+            day = next(
+                (date(2033, 1, 1) + timedelta(days=offset)).isoformat()
+                for offset in range(366)
+                if _chad_variation(
+                    GROUP, (date(2033, 1, 1) + timedelta(days=offset)).isoformat()
+                ) % size == size - 1
+            )
+            self.assertIn(line(self.store, GROUP, day, [(5, "Alice")]), (
+                "Nice job Claude!", "this one isn't diddyflation!"
+            ))
+            self.assertIn(line(self.store, GROUP, day, [(6, "Bob")]), pool)
 
     def test_the_callout_uses_a_line_from_the_set(self) -> None:
         self.store.add_message_line("callout", "{name}, off to {word} with you")

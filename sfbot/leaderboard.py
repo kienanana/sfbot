@@ -154,10 +154,20 @@ class LeaderboardStore:
                 chat_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
                 seen_at INTEGER NOT NULL,
+                name TEXT,
+                username TEXT,
                 PRIMARY KEY (chat_id, user_id)
             ) WITHOUT ROWID
             """
         )
+        member_columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(group_members)")
+        }
+        for column in ("name", "username"):
+            if column not in member_columns:
+                self._connection.execute(
+                    f"ALTER TABLE group_members ADD COLUMN {column} TEXT"
+                )
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS sf_events (
@@ -339,18 +349,42 @@ class LeaderboardStore:
                 (set_name, number - 1),
             )
 
-    def remember_member(self, *, chat_id: int, user_id: int, seen_at: int) -> None:
-        """Record that a user was seen in the group, which lets them submit by DM."""
+    def remember_member(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        seen_at: int,
+        name: str | None = None,
+        username: str | None = None,
+    ) -> None:
+        """Record that a user was seen in the group, which lets them submit by DM.
+
+        Their latest Telegram name and username are kept so commands can name them.
+        """
 
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO group_members (chat_id, user_id, seen_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT (chat_id, user_id) DO UPDATE SET seen_at = excluded.seen_at
+                INSERT INTO group_members (chat_id, user_id, seen_at, name, username)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                    seen_at = excluded.seen_at,
+                    name = excluded.name,
+                    username = excluded.username
                 """,
-                (chat_id, user_id, seen_at),
+                (chat_id, user_id, seen_at, name, username),
             )
+
+    def member_names(self, *, chat_id: int) -> dict[int, tuple[str | None, str | None]]:
+        """Return each member's latest Telegram name and username."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT user_id, name, username FROM group_members WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchall()
+        return {int(user_id): (name, username) for user_id, name, username in rows}
 
     def is_member(self, *, chat_id: int, user_id: int) -> bool:
         """Return whether a user has ever been seen in the group."""
@@ -830,6 +864,10 @@ _CHAD_LINES_SINGULAR = (
     "i'm from tel aviv and this is my favourite quizzer!",
 )
 _CHAD_LINES_PLURAL = ("are you guys poly? 👀",)
+
+# CHAD and CHUD lines can also belong to one person, joining the pool on days
+# they win. Their sets are stored as "<set>:<user ID>" and start empty.
+PERSONAL_SETS = ("chad", "chud")
 
 # The sets the group edits by command, with the lines each starts from. A
 # callout line names the repeat poster with {name} and the action word with
