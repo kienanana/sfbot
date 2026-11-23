@@ -6,6 +6,8 @@ from dataclasses import replace
 
 import json
 import logging
+import random
+import re
 import time
 import urllib.error
 import urllib.request
@@ -17,6 +19,7 @@ from typing import Any
 from .cache import DuplicateCache
 from .games import GAMES, expected_puzzle, parse_result
 from .leaderboard import (
+    MESSAGE_SETS,
     GameStandings,
     LeaderboardStore,
     PostedAnnouncement,
@@ -52,6 +55,10 @@ _ACTION_WORD_COMMAND = "/actionword"
 _NICKNAME_COMMAND = "/nickname"
 _POST_TIME_COMMAND = "/posttime"
 _RETENTION_COMMAND = "/retention"
+_LINES_COMMAND = "/lines"
+_ADD_LINE_COMMAND = "/addline"
+_DELETE_LINE_COMMAND = "/delline"
+_CALLOUT_PLACEHOLDERS = {"name", "word"}
 _OFF = "off"
 _ACKNOWLEDGEMENT = "\N{THUMBS UP SIGN}"
 _UNKNOWN_SENDER = (
@@ -185,18 +192,30 @@ class TelegramClient:
         )
 
 
-def _callout(action_word: str, display_name: str) -> list[str]:
-    """Return the lines that name the repeat poster after the `sf` reply.
+def _callout(
+    template: str, action_word: str, display_name: str
+) -> list[tuple[str, list[dict[str, object]]]]:
+    """Return the lines, with their entities, that name the repeat poster.
 
-    Sent without a parse_mode like everything else the bot says, so the
-    asterisks show up literally and no display name needs escaping.
+    Text between asterisks in the template is sent as a bold entity rather
+    than through a parse_mode, so no display name needs escaping. A template
+    with unpaired asterisks keeps them as written.
     """
 
+    parts = re.split(r"\*+", template)
+    if len(parts) % 2 == 0:
+        parts = [template]
+    text = ""
+    entities: list[dict[str, object]] = []
+    for index, part in enumerate(parts):
+        part = part.replace("{name}", display_name).replace("{word}", action_word)
+        if index % 2 and part:
+            entities.append(
+                {"type": "bold", "offset": _utf16_length(text), "length": _utf16_length(part)}
+            )
+        text += part
     handle = "".join(display_name.split())
-    return [
-        f"Uh oh! Looks like {display_name}'s getting *Sent to {action_word}*",
-        f"Let's drop a /Send{handle}To{action_word}",
-    ]
+    return [(text, entities), (f"Let's drop a /Send{handle}To{action_word}", [])]
 
 
 def _message_body(message: Mapping[str, object]) -> str:
@@ -422,9 +441,12 @@ def _render_announcement(
                 announcement.winners,
                 variation=_chad_variation(board_chat_id, day),
                 nicknames=nicknames,
+                line=announcement.line,
             )
         else:
-            rendered = format_chud_winners(announcement.winners, nicknames=nicknames)
+            rendered = format_chud_winners(
+                announcement.winners, nicknames=nicknames, line=announcement.line
+            )
         return _with_streaks(
             rendered,
             store=store,
@@ -552,6 +574,50 @@ def _change_setting(
     return f"Duplicate window: {retention_days} days"
 
 
+def _edit_lines(
+    message: Mapping[str, object], command: str, *, store: LeaderboardStore
+) -> str:
+    """List, add to, or delete from a message set, returning the reply."""
+
+    parts = _message_body(message).split(maxsplit=2)
+    set_name = parts[1].lower() if len(parts) > 1 else ""
+    argument = parts[2].strip() if len(parts) > 2 else ""
+    if set_name not in MESSAGE_SETS:
+        return f"Name a set: {', '.join(MESSAGE_SETS)}. For example /lines callout."
+    lines = store.message_lines(set_name)
+
+    if command == _LINES_COMMAND:
+        return "\n".join(f"{number}. {line}" for number, line in enumerate(lines, 1))
+
+    if command == _ADD_LINE_COMMAND:
+        if not argument:
+            return f"Add the line after the set, for example /addline {set_name} wahoo!"
+        unknown = set(re.findall(r"\{([^{}]*)\}", argument)) - _CALLOUT_PLACEHOLDERS
+        if set_name == "callout" and unknown:
+            return "A callout line can use only {name} and {word}."
+        store.add_message_line(set_name, argument)
+        return f"Added to {set_name}: {argument}"
+
+    if not argument.isdigit() or not 1 <= int(argument) <= len(lines):
+        return f"Use a line number from /lines {set_name}."
+    if len(lines) == 1:
+        return f"That's the last line in {set_name}. Add another before deleting it."
+    store.delete_message_line(set_name, int(argument))
+    return f"Deleted from {set_name}: {lines[int(argument) - 1]}"
+
+
+def _chad_line(store: LeaderboardStore, chat_id: int, day: str, winners: int) -> str:
+    lines = store.message_lines("chad") + store.message_lines(
+        "chad-solo" if winners == 1 else "chad-group"
+    )
+    return lines[_chad_variation(chat_id, day) % len(lines)]
+
+
+def _chud_line(store: LeaderboardStore, chat_id: int, day: str) -> str:
+    lines = store.message_lines("chud")
+    return lines[_chad_variation(chat_id, day) % len(lines)]
+
+
 def _current_settings(
     store: LeaderboardStore,
     *,
@@ -644,10 +710,17 @@ def handle_message(
         _NICKNAME_COMMAND,
         _POST_TIME_COMMAND,
         _RETENTION_COMMAND,
+        _LINES_COMMAND,
+        _ADD_LINE_COMMAND,
+        _DELETE_LINE_COMMAND,
     ):
         # Changes happen in the group only, so everyone sees them.
         if is_private:
             client.send_message(chat_id=chat_id, text="Change settings in the group chat.")
+        elif command in (_LINES_COMMAND, _ADD_LINE_COMMAND, _DELETE_LINE_COMMAND):
+            if is_board_group:
+                text = _edit_lines(message, command, store=store)
+                client.send_message(chat_id=chat_id, text=text)
         elif is_board_group:
             text = _change_setting(
                 message,
@@ -832,8 +905,9 @@ def handle_message(
         # The callout names whoever reposted, so it goes to the chat rather than
         # onto the original message it would otherwise seem to be about.
         if action_word and sender is not None:
-            for line in _callout(action_word, sender[1]):
-                client.send_message(chat_id=chat_id, text=line)
+            template = random.choice(store.message_lines("callout"))
+            for line, entities in _callout(template, action_word, sender[1]):
+                client.send_message(chat_id=chat_id, text=line, entities=entities)
 
         if updated_user_id is not None:
             _send_sf_ranking(
@@ -900,10 +974,10 @@ def post_due_leaderboard(
             )
             or chuds
         )
-    chad = format_chad_winners(
-        chads, variation=_chad_variation(board_chat_id, day), nicknames=nicknames
-    )
-    chud = format_chud_winners(chuds, nicknames=nicknames)
+    chad_line = _chad_line(store, board_chat_id, day, len(chads)) if chads else None
+    chud_line = _chud_line(store, board_chat_id, day) if chuds else None
+    chad = format_chad_winners(chads, nicknames=nicknames, line=chad_line)
+    chud = format_chud_winners(chuds, nicknames=nicknames, line=chud_line)
     chad = _with_streaks(
         chad,
         store=store,
@@ -941,6 +1015,8 @@ def post_due_leaderboard(
         chad_winners=chads if chad is not None else None,
         chud_winners=chuds if chud is not None else None,
         daily_ranking=ranks,
+        chad_line=chad_line,
+        chud_line=chud_line,
     )
     LOG.info("Posted the %s leaderboard to chat %s", day, board_chat_id)
 

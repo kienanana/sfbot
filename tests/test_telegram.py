@@ -208,7 +208,7 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(
             self.client.sent,
             [
-                (GROUP, "Uh oh! Looks like Alice's getting *Sent to Nuke*"),
+                (GROUP, "Uh oh! Looks like Alice's being Sent to Nuke"),
                 (GROUP, "Let's drop a /SendAliceToNuke"),
                 (GROUP, "SF leaderboard\n1. Alice - 🏆🆕 1 SF"),
             ],
@@ -238,7 +238,7 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(
             self.client.sent,
             [
-                (GROUP, "Uh oh! Looks like Bob's getting *Sent to Nuke*"),
+                (GROUP, "Uh oh! Looks like Bob's being Sent to Nuke"),
                 (GROUP, "Let's drop a /SendBobToNuke"),
                 (GROUP, "SF leaderboard\n1. Bob - 🏆🆕 1 SF"),
             ],
@@ -340,6 +340,90 @@ class HandleMessageTests(unittest.TestCase):
         )
         self.assertIsNone(self.store.setting("action_word"))
 
+    def test_line_commands_list_add_and_delete(self) -> None:
+        self.assertEqual(
+            self.command("/lines callout"),
+            "1. Uh oh! Looks like {name}'s being *Sent to {word}*",
+        )
+        self.assertEqual(
+            self.command("/addline callout {name} is off to {word}"),
+            "Added to callout: {name} is off to {word}",
+        )
+        self.assertEqual(
+            self.command("/delline callout 1"),
+            "Deleted from callout: Uh oh! Looks like {name}'s being *Sent to {word}*",
+        )
+        self.assertEqual(self.store.message_lines("callout"), ["{name} is off to {word}"])
+        self.assertTrue(self.command("/delline callout 1").startswith("That's the last"))
+        self.assertTrue(self.command("/addline CHAD-group nice").startswith("Added"))
+        self.assertEqual(self.store.message_lines("chad-group")[-1], "nice")
+
+    def test_invalid_line_commands_are_refused(self) -> None:
+        for text, reply in (
+            ("/lines", "Name a set"),
+            ("/addline crowd hi", "Name a set"),
+            ("/addline chad", "Add the line"),
+            ("/addline callout {nickname} goes", "A callout line can use only"),
+            ("/delline chad 0", "Use a line number"),
+            ("/delline chad 99", "Use a line number"),
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(self.command(text).startswith(reply))
+        self.assertEqual(
+            self.store.message_lines("callout"),
+            ["Uh oh! Looks like {name}'s being *Sent to {word}*"],
+        )
+
+    def test_the_callout_uses_a_line_from_the_set(self) -> None:
+        self.store.add_message_line("callout", "{name}, off to {word} with you")
+        self.store.delete_message_line("callout", 1)
+        share = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": "https://x.com/someone/status/123",
+        }
+        self.handle(share, action_word="Nuke")
+        self.handle({**share, "message_id": 42}, action_word="Nuke")
+        self.assertEqual(self.client.sent[0], (GROUP, "Alice, off to Nuke with you"))
+
+    def test_asterisks_in_a_callout_line_become_bold(self) -> None:
+        share = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Zoë 🐱"},
+            "text": "https://x.com/someone/status/123",
+        }
+        self.handle(share, action_word="Nuke")
+        for message_id, template, text, entities in (
+            (
+                42,
+                "Uh oh! Looks like {name}'s being *Sent to {word}*",
+                "Uh oh! Looks like Zoë 🐱's being Sent to Nuke",
+                [{"type": "bold", "offset": 33, "length": 12}],
+            ),
+            (
+                43,
+                "**{name}** is *off*",
+                "Zoë 🐱 is off",
+                [
+                    {"type": "bold", "offset": 0, "length": 6},
+                    {"type": "bold", "offset": 10, "length": 3},
+                ],
+            ),
+            (44, "2 * 3 {name}", "2 * 3 Zoë 🐱", []),
+        ):
+            with self.subTest(template=template):
+                self.store.add_message_line("callout", template)
+                self.store.delete_message_line("callout", 1)
+                self.client.sent.clear()
+                self.client.sent_entities.clear()
+                self.handle({**share, "message_id": message_id}, action_word="Nuke")
+                self.assertEqual(self.client.sent[0], (GROUP, text))
+                self.assertEqual(self.client.sent_entities[0], entities)
+
     def test_a_nickname_replaces_the_name_in_the_callout(self) -> None:
         first = {
             "chat": {"id": GROUP, "type": "supergroup"},
@@ -362,7 +446,7 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(
             self.client.sent,
             [
-                (GROUP, "Uh oh! Looks like Juan's getting *Sent to Nuke*"),
+                (GROUP, "Uh oh! Looks like Juan's being Sent to Nuke"),
                 (GROUP, "Let's drop a /SendJuanToNuke"),
                 (GROUP, "SF leaderboard\n1. Juan - 🏆🆕 1 SF"),
             ],
@@ -441,7 +525,7 @@ class HandleMessageTests(unittest.TestCase):
         self.handle(share, client=client, action_word="Nuke")
         self.assertEqual(len(client.replies), 1)
         self.assertEqual(
-            client.sent, [(GROUP, "Uh oh! Looks like Bob's getting *Sent to Nuke*")]
+            client.sent, [(GROUP, "Uh oh! Looks like Bob's being Sent to Nuke")]
         )
 
     def test_ambiguous_sf_timeout_does_not_send_a_second_reply(self) -> None:
@@ -715,7 +799,7 @@ class HandleMessageTests(unittest.TestCase):
         )
         chad, chud = self.client.sent[1:3]
         self.assertIn("Alice is the CHAD of the day!", chad[1])
-        self.assertEqual(chud[1], "🚽 Ding ding ding! Bob is the CHUD of the day!")
+        self.assertEqual(chud[1], "🚽 Ding ding ding! Bob is the CHUD of the day!\nCan't add this one to the splitwise!")
         self.client.sent.clear()
 
         # A result that arrives after the post must not revise either winner.
@@ -728,6 +812,11 @@ class HandleMessageTests(unittest.TestCase):
                 "text": "Wordle 4,351 1/6",
             }
         )
+        # Nor may editing the lines change the closing lines already posted.
+        for set_name in ("chad", "chad-solo", "chud"):
+            for _ in self.store.message_lines(set_name):
+                self.store.delete_message_line(set_name, 1)
+            self.store.add_message_line(set_name, "edited")
         ask("/chad@sfbot", chat_id=GROUP)
         ask("/chud")
         self.assertEqual(self.client.sent, [(GROUP, chad[1]), (DM, chud[1])])
@@ -833,7 +922,7 @@ class HandleMessageTests(unittest.TestCase):
         self.assertTrue(
             chad[1].startswith("👑 Ding ding ding! Juan is the CHAD of the day!\n")
         )
-        self.assertEqual(chud[1], "🚽 Ding ding ding! Diddy is the CHUD of the day!")
+        self.assertEqual(chud[1], "🚽 Ding ding ding! Diddy is the CHUD of the day!\nCan't add this one to the splitwise!")
 
     def test_an_announcement_from_an_older_build_still_follows_a_nickname(self) -> None:
         # A day posted before winners were recorded leaves only its message,
@@ -902,7 +991,7 @@ class HandleMessageTests(unittest.TestCase):
         self.assertTrue(
             chad[1].startswith("👑 Ding ding ding! Alice is the CHAD of the day!\n")
         )
-        self.assertEqual(chud[1], "🚽 Ding ding ding! Bob is the CHUD of the day!")
+        self.assertEqual(chud[1], "🚽 Ding ding ding! Bob is the CHUD of the day!\nCan't add this one to the splitwise!")
 
     def ask_both(
         self, date: int, nicknames: dict[int, str] | None = None
@@ -1484,7 +1573,7 @@ class PostDueLeaderboardTests(unittest.TestCase):
 
         self.assertEqual(
             self.client.sent[2],
-            (GROUP, "🚽 Ding ding ding! Bob is the CHUD of the day!"),
+            (GROUP, "🚽 Ding ding ding! Bob is the CHUD of the day!\nCan't add this one to the splitwise!"),
         )
         self.assertIn("Alice is the CHAD of the day!", self.client.sent[1][1])
         self.assertNotIn("🔥", self.client.sent[1][1])
@@ -1511,7 +1600,11 @@ class PostDueLeaderboardTests(unittest.TestCase):
         # Bob scored worst, but the title goes to whoever played nothing.
         self.assertEqual(
             self.client.sent[2],
-            (GROUP, "🚽 Ding ding ding! Diddy is the CHUD of the day!"),
+            (
+                GROUP,
+                "🚽 Ding ding ding! Diddy is the CHUD of the day!\n"
+                "Can't add this one to the splitwise!",
+            ),
         )
         self.assertIn("Alice is the CHAD of the day!", self.client.sent[1][1])
         self.assertIn("— 🚽 Diddy — played nothing", self.client.sent[3][1])
@@ -1541,7 +1634,11 @@ class PostDueLeaderboardTests(unittest.TestCase):
 
         self.assertEqual(
             self.client.sent[2],
-            (GROUP, "🚽 Ding ding ding! Bob is the CHUD of the day!"),
+            (
+                GROUP,
+                "🚽 Ding ding ding! Bob is the CHUD of the day!\n"
+                "Can't add this one to the splitwise!",
+            ),
         )
         self.assertNotIn("played nothing", self.client.sent[3][1])
 

@@ -18,11 +18,15 @@ Setting `SFBOT_ACTION_WORD` adds a callout naming whoever reposted. With
 
 ```
 sf @Bob                                     (a reply to Alice's message)
-Uh oh! Looks like Bob's getting *Sent to Nuke*
+Uh oh! Looks like Bob's being Sent to Nuke     ("Sent to Nuke" in bold)
 Let's drop a /SendBobToNuke
 SF leaderboard
 1. Bob - 🏆🆕 1 SF
 ```
+
+The "Uh oh!" line is picked at random from the `callout` message set, which the
+group can extend; see [Message sets](#message-sets). The `/Send…To…` line is
+fixed.
 
 Each successful SF adds one to the repeat poster's lifetime count in that chat.
 The SF leaderboard is the final message in the response. 🏆 marks the leader
@@ -34,9 +38,10 @@ daily games post and is never included in that scheduled post. In a group,
 counts after the sender has been seen in that group. Counts start when this
 feature is installed; earlier SF replies cannot be reconstructed.
 
-The past tense is the word plus `d`, so the word is expected to end in `e`. The
-asterisks are literal: the bot sends no `parse_mode`, so nothing in a display
-name ever needs escaping.
+The past tense is the word plus `d`, so the word is expected to end in `e`. Text
+between asterisks in a callout line (`*bold*` or `**bold**`) is sent as bold.
+The bot uses message entities rather than a `parse_mode`, so nothing in a
+display name ever needs escaping; a line with unpaired asterisks keeps them.
 
 The name is the person's Telegram first name unless `SFBOT_NICKNAMES` gives one
 for them; see [Nicknames](#nicknames).
@@ -93,6 +98,32 @@ the environment variable, which stays the default until a command sets one.
 Each command without a value shows the current one. In a DM the bot asks you to
 use the group instead; other groups are ignored. Moving the post time after
 today's post has gone out does not post it again.
+
+### Message sets
+
+The callout line and the CHAD and CHUD closing lines are each drawn from a set of lines
+that the group can edit with commands. The same rules apply: anyone in the
+board group can use them, and nobody can from a DM.
+
+| Set | Used for |
+| --- | --- |
+| `callout` | The "Uh oh!" line; `{name}` is the reposter, `{word}` the action word |
+| `chad` | CHAD closing lines for one winner or several |
+| `chad-solo` | Extra CHAD closing lines for a single winner |
+| `chad-group` | Extra CHAD closing lines for a tie |
+| `chud` | CHUD closing lines |
+
+| Command | Effect |
+| --- | --- |
+| `/lines callout` | List the set's lines, numbered |
+| `/addline callout {name} is off to {word}` | Add a line to the set |
+| `/delline callout 2` | Delete line 2 of the set |
+
+The bot refuses to delete a set's last line, and refuses callout lines with
+placeholders other than `{name}` and `{word}`. The sets start from the lines in
+the code the first time the bot runs, and edits are kept from then on. A posted
+CHAD or CHUD keeps its closing line, so `/chad` and `/chud` repeat it even after
+the set changes.
 
 ## Architecture
 

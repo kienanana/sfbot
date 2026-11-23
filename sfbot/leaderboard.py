@@ -41,6 +41,7 @@ class PostedAnnouncement:
 
     message: str | None
     winners: tuple[Winner, ...] | None
+    line: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +116,8 @@ class LeaderboardStore:
                 chad_winners TEXT,
                 chud_winners TEXT,
                 daily_ranking TEXT,
+                chad_line TEXT,
+                chud_line TEXT,
                 PRIMARY KEY (chat_id, local_date)
             ) WITHOUT ROWID
             """
@@ -128,6 +131,8 @@ class LeaderboardStore:
             "chad_winners",
             "chud_winners",
             "daily_ranking",
+            "chad_line",
+            "chud_line",
         ):
             if column not in posted_columns:
                 self._connection.execute(
@@ -193,6 +198,28 @@ class LeaderboardStore:
             )
             """
         )
+        # Message sets start from the lines in code, once, so a line the group
+        # deletes stays deleted.
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS message_lines (
+                id INTEGER PRIMARY KEY,
+                set_name TEXT NOT NULL,
+                text TEXT NOT NULL
+            )
+            """
+        )
+        self._connection.execute(
+            "CREATE TABLE IF NOT EXISTS seeded_sets (set_name TEXT PRIMARY KEY) WITHOUT ROWID"
+        )
+        for set_name, lines in MESSAGE_SETS.items():
+            if self._connection.execute(
+                "INSERT OR IGNORE INTO seeded_sets (set_name) VALUES (?)", (set_name,)
+            ).rowcount:
+                self._connection.executemany(
+                    "INSERT INTO message_lines (set_name, text) VALUES (?, ?)",
+                    [(set_name, line) for line in lines],
+                )
         self._connection.commit()
 
     def record_sf(
@@ -282,6 +309,33 @@ class LeaderboardStore:
             self._connection.execute(
                 "INSERT OR REPLACE INTO nicknames (user_id, nickname) VALUES (?, ?)",
                 (user_id, nickname),
+            )
+
+    def message_lines(self, set_name: str) -> list[str]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT text FROM message_lines WHERE set_name = ? ORDER BY id",
+                (set_name,),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def add_message_line(self, set_name: str, text: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT INTO message_lines (set_name, text) VALUES (?, ?)",
+                (set_name, text),
+            )
+
+    def delete_message_line(self, set_name: str, number: int) -> None:
+        """Delete the set's line at a 1-based position in message_lines order."""
+
+        with self._lock, self._connection:
+            self._connection.execute(
+                """DELETE FROM message_lines WHERE id = (
+                       SELECT id FROM message_lines WHERE set_name = ?
+                       ORDER BY id LIMIT 1 OFFSET ?
+                   )""",
+                (set_name, number - 1),
             )
 
     def remember_member(self, *, chat_id: int, user_id: int, seen_at: int) -> None:
@@ -466,6 +520,8 @@ class LeaderboardStore:
         chad_winners: Sequence[Winner] | None = None,
         chud_winners: Sequence[Winner] | None = None,
         daily_ranking: Sequence[DailyRank] | None = None,
+        chad_line: str | None = None,
+        chud_line: str | None = None,
     ) -> bool:
         """Record that a chat's daily post is done, returning False if it already was."""
 
@@ -473,8 +529,9 @@ class LeaderboardStore:
             cursor = self._connection.execute(
                 """INSERT OR IGNORE INTO posted_days
                    (chat_id, local_date, chad_message, chud_message,
-                    chad_winners, chud_winners, daily_ranking)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    chad_winners, chud_winners, daily_ranking, chad_line,
+                    chud_line)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     chat_id,
                     local_date,
@@ -483,6 +540,8 @@ class LeaderboardStore:
                     _encode_winners(chad_winners),
                     _encode_winners(chud_winners),
                     _encode_daily_ranking(daily_ranking),
+                    chad_line,
+                    chud_line,
                 ),
             )
         return cursor.rowcount == 1
@@ -498,7 +557,8 @@ class LeaderboardStore:
 
         with self._lock:
             row = self._connection.execute(
-                """SELECT chad_message, chud_message, chad_winners, chud_winners
+                """SELECT chad_message, chud_message, chad_winners, chud_winners,
+                          chad_line, chud_line
                    FROM posted_days
                    WHERE chat_id = ? AND local_date = ?""",
                 (chat_id, local_date),
@@ -506,8 +566,12 @@ class LeaderboardStore:
         if row is None:
             return None
         return (
-            PostedAnnouncement(message=row[0], winners=_decode_winners(row[2])),
-            PostedAnnouncement(message=row[1], winners=_decode_winners(row[3])),
+            PostedAnnouncement(
+                message=row[0], winners=_decode_winners(row[2]), line=row[4]
+            ),
+            PostedAnnouncement(
+                message=row[1], winners=_decode_winners(row[3]), line=row[5]
+            ),
         )
 
     def posted_daily_ranking(
@@ -780,42 +844,63 @@ _CHAD_LINES_SINGULAR = (
 )
 _CHAD_LINES_PLURAL = ("are you guys poly? 👀",)
 
+# The sets the group edits by command, with the lines each starts from. A
+# callout line names the repeat poster with {name} and the action word with
+# {word}; a CHAD line closes the announcement, drawing on chad and on chad-solo
+# or chad-group by how many won; a chud line closes the CHUD announcement.
+MESSAGE_SETS: dict[str, tuple[str, ...]] = {
+    "callout": ("Uh oh! Looks like {name}'s being *Sent to {word}*",),
+    "chad": _CHAD_LINES_BOTH,
+    "chad-solo": _CHAD_LINES_SINGULAR,
+    "chad-group": _CHAD_LINES_PLURAL,
+    "chud": ("Can't add this one to the splitwise!",),
+}
+
 
 def format_chad_winners(
     winners: Sequence[Winner],
     *,
     variation: int = 0,
     nicknames: Mapping[int, str] | None = None,
+    line: str | None = None,
 ) -> str | None:
-    """Name the best total placement, sharing ties, with a fitting closing line."""
+    """Name the best total placement, sharing ties, with a fitting closing line.
+
+    Without a line, one of the lines in code is chosen by variation.
+    """
 
     names = _named(winners, nicknames)
     if not names:
         return None
 
-    lines = _CHAD_LINES_BOTH + (
-        _CHAD_LINES_SINGULAR if len(names) == 1 else _CHAD_LINES_PLURAL
-    )
+    if line is None:
+        lines = _CHAD_LINES_BOTH + (
+            _CHAD_LINES_SINGULAR if len(names) == 1 else _CHAD_LINES_PLURAL
+        )
+        line = lines[variation % len(lines)]
     verb = "is the CHAD" if len(names) == 1 else "are the CHADs"
-    return (
-        f"👑 Ding ding ding! {_named_winners(names)} {verb} of the day!\n"
-        f"{lines[variation % len(lines)]}"
-    )
+    return f"👑 Ding ding ding! {_named_winners(names)} {verb} of the day!\n{line}"
 
 
 def format_chud_winners(
     winners: Sequence[Winner],
     *,
     nicknames: Mapping[int, str] | None = None,
+    line: str | None = None,
 ) -> str | None:
-    """Name whoever did worst across the day's games, sharing ties."""
+    """Name whoever did worst across the day's games, sharing ties.
+
+    A day posted before CHUD lines existed has no line, and gets none.
+    """
 
     names = _named(winners, nicknames)
     if not names:
         return None
     if len(names) == 1:
-        return f"🚽 Ding ding ding! {names[0]} is the CHUD of the day!"
-    return f"🚽 Ding ding ding! {_named_winners(names)} are the CHUDs of the day!"
+        message = f"🚽 Ding ding ding! {names[0]} is the CHUD of the day!"
+    else:
+        message = f"🚽 Ding ding ding! {_named_winners(names)} are the CHUDs of the day!"
+    return message if line is None else f"{message}\n{line}"
 
 
 def format_chad(
