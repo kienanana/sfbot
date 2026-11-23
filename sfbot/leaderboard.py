@@ -167,6 +167,14 @@ class LeaderboardStore:
         self._connection.execute(
             "CREATE INDEX IF NOT EXISTS sf_events_ranking ON sf_events (chat_id, user_id)"
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS announced_versions (
+                chat_id INTEGER PRIMARY KEY,
+                commit_hash TEXT NOT NULL
+            )
+            """
+        )
         self._connection.commit()
 
     def record_sf(
@@ -207,6 +215,24 @@ class LeaderboardStore:
             for user_id, count in rows
         ]
         return sorted(ranking, key=lambda rank: (-rank.count, rank.display_name.casefold(), rank.user_id))
+
+    def announced_commit(self, *, chat_id: int) -> str | None:
+        """Return the last version whose changelog was posted, if any."""
+
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT commit_hash FROM announced_versions WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+        return None if row is None else row[0]
+
+    def mark_announced(self, *, chat_id: int, commit: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO announced_versions (chat_id, commit_hash)"
+                " VALUES (?, ?)",
+                (chat_id, commit),
+            )
 
     def remember_member(self, *, chat_id: int, user_id: int, seen_at: int) -> None:
         """Record that a user was seen in the group, which lets them submit by DM."""

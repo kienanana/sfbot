@@ -5,8 +5,9 @@ import os
 from pathlib import Path
 
 from .cache import DuplicateCache
+from .changelog import announce_changelog
 from .leaderboard import LeaderboardStore
-from .telegram import TelegramClient, run_polling
+from .telegram import TelegramAPIError, TelegramClient, run_polling
 from .times import parse_daily_time
 
 
@@ -135,8 +136,20 @@ def main() -> None:
         ) as cache,
         LeaderboardStore(database_path) as store,
     ):
+        client = TelegramClient(token)
+        changelog = os.environ.get("SFBOT_CHANGELOG_PATH", "").strip()
+        if board_chat_id is not None and changelog:
+            try:
+                announce_changelog(
+                    client, store, chat_id=board_chat_id, path=Path(changelog)
+                )
+            except (OSError, TelegramAPIError) as error:
+                # A missed changelog must not keep the bot from starting.
+                logging.getLogger(__name__).warning(
+                    "Changelog not announced (%s)", error
+                )
         run_polling(
-            TelegramClient(token),
+            client,
             cache,
             store,
             poll_timeout=poll_timeout,
