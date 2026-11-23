@@ -25,7 +25,6 @@ from .leaderboard import (
     LeaderboardStore,
     PostedAnnouncement,
     Winner,
-    absent_chud_winners,
     apply_nicknames,
     chad_winners,
     chud_winners,
@@ -1001,7 +1000,6 @@ def post_due_leaderboard(
     post_minute: int,
     now: int | None = None,
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
-    absent_chud_user_id: int | None = None,
 ) -> None:
     """Post the day's leaderboard to the group if it is owed one."""
 
@@ -1035,21 +1033,6 @@ def post_due_leaderboard(
     )
     chads = chad_winners(recorded)
     chuds = chud_winners(recorded)
-    if absent_chud_user_id is not None:
-        # Sitting the day out decides the CHUD on its own. The nickname is what
-        # the day should remember them by; a name they submitted under before is
-        # the next best thing, since a no-show may have no results at all.
-        absent_name = (
-            nicknames.get(absent_chud_user_id)
-            or store.latest_name(chat_id=board_chat_id, user_id=absent_chud_user_id)
-            or str(absent_chud_user_id)
-        )
-        chuds = (
-            absent_chud_winners(
-                recorded, user_id=absent_chud_user_id, name=absent_name
-            )
-            or chuds
-        )
     chad_line = _chad_line(store, board_chat_id, day, len(chads)) if chads else None
     chud_line = _chud_line(store, board_chat_id, day) if chuds else None
     chad = format_chad_winners(chads, nicknames=nicknames, line=chad_line)
@@ -1198,7 +1181,6 @@ def run_polling(
     post_minute: int | None = None,
     action_word: str | None = None,
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
-    absent_chud_user_id: int | None = None,
     retention_days: int = 5,
 ) -> None:
     offset: int | None = None
@@ -1245,8 +1227,6 @@ def run_polling(
                 options["post_minute"] = current["post_minute"]
             if name in ("leaderboard", "season"):
                 options["nicknames"] = current["nicknames"]
-            if name == "leaderboard":
-                options["absent_chud_user_id"] = absent_chud_user_id
             try:
                 task(client, store, **options)
             except request_errors as error:
