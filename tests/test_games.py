@@ -10,21 +10,35 @@ class ParseResultTests(unittest.TestCase):
                 "Wordle 1,234 3/6\n\n⬛\U0001f7e9\n\U0001f7e9\U0001f7e9",
                 "1234",
                 "3/6",
-                3,
             ),
-            ("Wordle 1234 6/6", "1234", "6/6", 6),
-            ("Wordle 1.234 4/6*", "1234", "4/6", 4),
-            ("wordle 999 x/6", "999", "X/6", 7),
-            ("gg all\nWordle 1,234 2/6\n\U0001f7e9", "1234", "2/6", 2),
+            ("Wordle 1234 6/6", "1234", "6/6"),
+            ("Wordle 1.234 4/6*", "1234", "4/6*"),
+            ("wordle 999 x/6", "999", "X/6"),
+            ("gg all\nWordle 1,234 2/6\n\U0001f7e9", "1234", "2/6"),
         ]
-        for text, puzzle_id, score, rank_key in cases:
+        for text, puzzle_id, score in cases:
             result = parse_result(text)
             self.assertIsNotNone(result, text)
             assert result is not None
             self.assertEqual(result.game, "Wordle")
             self.assertEqual(result.puzzle_id, puzzle_id)
             self.assertEqual(result.score, score)
-            self.assertEqual(result.rank_key, rank_key)
+
+    def test_wordle_hard_mode_ranks_against_its_own_mode(self) -> None:
+        def rank(score: str) -> float:
+            result = parse_result(f"Wordle 1,234 {score}")
+            assert result is not None
+            return result.rank_key
+
+        best_first = ["1/6", "2/6", "3/6*", "3/6", "4/6*", "4/6", "5/6*", "5/6",
+                      "6/6*", "6/6", "X/6"]
+        ranks = [rank(score) for score in best_first]
+        self.assertEqual(ranks, sorted(ranks))
+        self.assertEqual(len(set(ranks)), len(ranks))
+        # Hard mode never ranks below the same normal result.
+        self.assertEqual(rank("1/6*"), rank("1/6"))
+        self.assertEqual(rank("2/6*"), rank("2/6"))
+        self.assertEqual(rank("X/6*"), rank("X/6"))
 
     def test_krillion_share_text_ranks_a_deeper_dive_first(self) -> None:
         text = (
