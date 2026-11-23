@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from fractions import Fraction
 from pathlib import Path
 
 from sfbot.games import ParsedResult
@@ -72,8 +73,9 @@ class LeaderboardStoreTests(unittest.TestCase):
         for game in ("Fermi", "Krillion"):
             self.record("Alex", ParsedResult(game, "42", "1", 1), user_id=6)
         boards = self.store.standings(chat_id=-100, local_date=DAY)
-        from sfbot.leaderboard import _total_placings
-        self.assertEqual(_total_placings(boards), {5: 5, 6: 4})
+        from sfbot.leaderboard import _day_scores
+        # One game at first place plus two skips, against three games averaging 4/3.
+        self.assertEqual(_day_scores(boards), {5: 2, 6: Fraction(4, 3)})
         self.assertIn("Alex is the CHAD", format_chad(boards))
         self.assertIn("Alex is the CHUD", format_chud(boards))
 
@@ -85,14 +87,14 @@ class LeaderboardStoreTests(unittest.TestCase):
         boards = self.store.standings(chat_id=-100, local_date=DAY)
         ranks = daily_ranking(boards)
         self.assertEqual([(rank.user_id, rank.points) for rank in ranks],
-                         [(5, 2), (6, 4), (7, 4)])
+                         [(5, 1), (6, 2.5), (7, 2.5)])
         shown = format_daily_ranking(
             ranks, local_date=DAY, chads=chad_winners(boards),
             chuds=chud_winners(boards), nicknames={5: "Juan"},
         )
-        self.assertIn("1. 👑 Juan — 2 points", shown)
-        self.assertIn("2. 🚽 Bob — 4 points", shown)
-        self.assertIn("2. 🚽 Cara — 4 points", shown)
+        self.assertIn("1. 👑 Juan — 1 point", shown)
+        self.assertIn("2. 🚽 Bob — 2.5 points", shown)
+        self.assertIn("2. 🚽 Cara — 2.5 points", shown)
 
     def test_posted_ranking_survives_reopen_and_late_results(self) -> None:
         self.store.mark_posted(

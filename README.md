@@ -325,10 +325,11 @@ has its own emoji, and the player or players in first place get a 👑. Use
 `/games` in either chat for links to all supported games.
 
 Each game and puzzle number has its own board, ordered best first with ties
-sharing a placement and first place crowned 👑. CHAD has the best total placement
-across boards; CHUD has the worst. The `/daily` ranking shows this sum for every
-player, with lower scores better. Missing a board costs one place beyond last,
-and ties share the placement and title. Players are identified by user ID, so
+sharing a placement and first place crowned 👑. A player's day score is their
+average placement over the boards they played, plus 0.5 for each board they
+skipped. CHAD has the best day score and CHUD the worst. The `/daily` ranking
+shows it for every player, with lower scores better, and ties share the placement
+and title. `/scoresystem` explains how each game is ranked. Players are identified by user ID, so
 matching names never combine scores. Display names come from each player's latest submission
 that day, unless overridden by a nickname.
 

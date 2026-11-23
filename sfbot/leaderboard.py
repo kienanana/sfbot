@@ -9,6 +9,7 @@ import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
+from fractions import Fraction
 from itertools import groupby
 from pathlib import Path
 
@@ -48,7 +49,7 @@ class PostedAnnouncement:
 class DailyRank:
     user_id: int
     display_name: str
-    points: int
+    points: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -737,21 +738,24 @@ def _placings(entries: Sequence[Entry]) -> list[int]:
     return places
 
 
-def _total_placings(standings: Sequence[GameStandings]) -> dict[int, int]:
-    """Sum placements across boards; skipping costs one worse than last place."""
-    totals: dict[int, int] = {}
+# A skipped game costs half a place on top of the average, so playing every
+# game still counts without one missed game deciding the day outright.
+SKIP_PENALTY = Fraction(1, 2)
+
+
+def _day_scores(standings: Sequence[GameStandings]) -> dict[int, Fraction]:
+    """Average each player's placings over the games they played, plus a fixed
+    penalty for each game they skipped. Fractions keep equal scores equal."""
+
+    played: dict[int, list[int]] = {}
     for board in standings:
-        for entry in board.entries:
-            totals.setdefault(entry.user_id, 0)
-    for board in standings:
-        places = _placings(board.entries)
-        skipped = max(places) + 1
-        played = {
-            entry.user_id: place for entry, place in zip(board.entries, places)
-        }
-        for user_id in totals:
-            totals[user_id] += played.get(user_id, skipped)
-    return totals
+        for entry, place in zip(board.entries, _placings(board.entries)):
+            played.setdefault(entry.user_id, []).append(place)
+    return {
+        user_id: Fraction(sum(places), len(places))
+        + SKIP_PENALTY * (len(standings) - len(places))
+        for user_id, places in played.items()
+    }
 
 
 def _winner_entries(standings: Sequence[GameStandings], *, best: bool) -> list[Entry]:
@@ -760,7 +764,7 @@ def _winner_entries(standings: Sequence[GameStandings], *, best: bool) -> list[E
     Players are identified by user ID independently of their display names.
     """
 
-    totals = _total_placings(standings)
+    totals = _day_scores(standings)
     if not totals:
         return []
 
@@ -1005,7 +1009,7 @@ def _decode_daily_ranking(raw: object) -> tuple[DailyRank, ...] | None:
         if not isinstance(data, list):
             return None
         return tuple(
-            DailyRank(int(user_id), str(name), int(points))
+            DailyRank(int(user_id), str(name), float(points))
             for user_id, name, points in data
         )
     except (ValueError, TypeError):
@@ -1015,7 +1019,7 @@ def _decode_daily_ranking(raw: object) -> tuple[DailyRank, ...] | None:
 def daily_ranking(standings: Sequence[GameStandings]) -> list[DailyRank]:
     """Rank all participants by the placement total used for CHAD and CHUD."""
 
-    totals = _total_placings(standings)
+    totals = _day_scores(standings)
     names = {
         entry.user_id: entry.display_name
         for board in standings
@@ -1023,7 +1027,7 @@ def daily_ranking(standings: Sequence[GameStandings]) -> list[DailyRank]:
     }
     return sorted(
         (
-            DailyRank(user_id, names[user_id], points)
+            DailyRank(user_id, names[user_id], float(points))
             for user_id, points in totals.items()
         ),
         key=lambda rank: (rank.points, rank.display_name, rank.user_id),
@@ -1042,13 +1046,14 @@ def format_daily_ranking(
 
     lines = [
         f"Final rankings - {local_date}",
-        "Lower is better: sum of game placements; a missed game scores one past last place.",
+        "Lower is better: average placing over the games played, plus 0.5 per game"
+        " skipped. /scoresystem explains the scoring.",
     ]
     chad_ids = {user_id for user_id, _ in chads}
     chud_ids = {user_id for user_id, _ in chuds}
     names = nicknames or {}
     place = 0
-    previous: int | None = None
+    previous: float | None = None
     for index, rank in enumerate(ranking, start=1):
         if rank.points != previous:
             place = index
@@ -1059,7 +1064,7 @@ def format_daily_ranking(
         unit = "point" if rank.points == 1 else "points"
         lines.append(
             f"{place}. {badges}{names.get(rank.user_id, rank.display_name)} "
-            f"— {rank.points} {unit}"
+            f"— {round(rank.points, 2):g} {unit}"
         )
     return "\n".join(lines)
 
