@@ -1135,6 +1135,23 @@ class HandleMessageTests(unittest.TestCase):
                 nicknames={5: "Juan", 6: "Diddy"} if nicknames is None else nicknames,
             )
 
+    def test_score_system_explains_every_game_in_any_chat(self) -> None:
+        for chat_id, chat_type in ((DM, "private"), (OTHER_GROUP, "supergroup")):
+            self.handle(
+                {
+                    "chat": {"id": chat_id, "type": chat_type},
+                    "message_id": 8,
+                    "date": 2_000_000_100,
+                    "from": {"id": 9, "first_name": "Stranger"},
+                    "text": "/scoresystem",
+                    "entities": command_entity("/scoresystem"),
+                }
+            )
+        self.assertEqual([chat for chat, _ in self.client.sent], [DM, OTHER_GROUP])
+        text = self.client.sent[0][1]
+        for heading in ("average placing", "Wordle:", "Connections:", "Krillion:", "Fermi:"):
+            self.assertIn(heading, text)
+
     def test_games_command_links_every_supported_game(self) -> None:
         for chat_id, chat_type, command in (
             (DM, "private", "/games"),

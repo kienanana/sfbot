@@ -345,6 +345,7 @@ that day, unless overridden by a nickname.
 | Command | Response |
 | --- | --- |
 | `/games` | Links to all supported games |
+| `/scoresystem` | How the day score and each game's ranking work, and why |
 | `/leaderboard` | Current standings, including results submitted after the daily post |
 | `/chad`, `/chud` | The saved announcement for today, or a note that it is not decided yet |
 | `/daily` | Today's saved final ranking and placement scores after the daily post |

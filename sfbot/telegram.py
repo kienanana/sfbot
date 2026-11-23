@@ -46,6 +46,7 @@ LOG = logging.getLogger(__name__)
 
 _LEADERBOARD_COMMAND = "/leaderboard"
 _GAMES_COMMAND = "/games"
+_SCORE_SYSTEM_COMMAND = "/scoresystem"
 _CHAD_COMMAND = "/chad"
 _CHUD_COMMAND = "/chud"
 _DAILY_COMMAND = "/daily"
@@ -251,6 +252,21 @@ def _games_message() -> tuple[str, list[dict[str, object]]]:
         )
         text += prefix + game.name
     return text, entities
+
+
+_SCORE_SYSTEM = """How the day is scored
+
+Each game's board ranks its players best first, and ties share a placing: two players tied for first both place 1, and the next places 3. Your day score is your average placing over the games you played, plus 0.5 for each game you skipped. Lower is better. The best day score is CHAD and the worst is CHUD; ties share the title.
+
+The average keeps one bad game from sinking a good day, and the 0.5 a skip costs is half of what one place lower on that board would. So skipping still hurts, but finishing every game is no longer the only way to win.
+
+Wordle: fewer guesses is better, and X/6 is last. Hard mode (a * after the score) makes every guess reuse the hints so far, so the same count is a better result there. Each result ranks by where it falls among a solver's results in its own mode: the share of games it beats, counting half of those it ties. The solver played every answer from eleven common openers, in each mode. That puts 3/6* ahead of 3/6, 4/6* ahead of 4/6, and so on, while 3/6 still beats 4/6*. Hard mode never ranks below the same count in normal mode, and 1/6, 2/6 and X/6 tie across modes.
+
+Connections: fewer mistakes is better, and four mistakes is a loss. Within the same mistakes, each unsolved category costs 0.1, then a solve order that leaves the harder colours (purple, then blue) until later costs a little more. Neither adjustment adds up to one mistake.
+
+Krillion: a deeper dive is better.
+
+Fermi: the score is how far off your guesses were, so 1× is perfect and lower is better."""
 
 
 def _leading_command(message: Mapping[str, object]) -> str | None:
@@ -875,6 +891,10 @@ def handle_message(
             client, store, board_chat_id=sf_chat_id,
             to_chat_id=chat_id, nicknames=nicknames,
         )
+        return
+
+    if command == _SCORE_SYSTEM_COMMAND:
+        client.send_message(chat_id=chat_id, text=_SCORE_SYSTEM)
         return
 
     if command in (_LINES_COMMAND, _ADD_LINE_COMMAND, _DELETE_LINE_COMMAND, _NAMES_COMMAND):
