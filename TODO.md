@@ -5,6 +5,15 @@ Only one instance may poll with the token at a time. Temporary downtime and loss
 of the five-day link cache are acceptable; game results are durable and have no
 retention window. Deployment checks below remain unverified by local tests.
 
+## Planned features
+
+- [x] Change the action word, nicknames, post time, and duplicate window from
+      the group by command; environment variables become defaults.
+- [ ] Vary the repeat-poster callout from a set of lines, and let the group
+      list, add, and delete lines in every message set (callout and CHAD).
+- [ ] Reset the `/overall` CHAD and CHUD totals, possibly every month.
+- [ ] Revise the placement scoring for the daily games (requirements to gather).
+
 ## P1 — Reliability and result correctness
 
 - [ ] Persist the processed Telegram update offset in SQLite and test restart

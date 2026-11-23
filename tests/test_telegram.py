@@ -244,6 +244,102 @@ class HandleMessageTests(unittest.TestCase):
             ],
         )
 
+    def command(
+        self,
+        text: str,
+        *,
+        chat: dict[str, object] | None = None,
+        reply_to: dict[str, object] | None = None,
+        **settings: object,
+    ) -> str:
+        """Send a command from Alice and return the bot's last message."""
+
+        message: dict[str, object] = {
+            "chat": chat or {"id": GROUP, "type": "supergroup"},
+            "message_id": 50,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": text,
+            "entities": command_entity(text),
+        }
+        if reply_to is not None:
+            message["reply_to_message"] = {"message_id": 49, "from": reply_to}
+        handle_message(
+            message,  # type: ignore[arg-type]
+            cache=self.cache,
+            store=self.store,
+            client=self.client,
+            utc_offset_minutes=SGT_OFFSET,
+            board_chat_id=GROUP,
+            **settings,  # type: ignore[arg-type]
+        )
+        return self.client.sent[-1][1] if self.client.sent else ""
+
+    def test_settings_shows_the_current_values(self) -> None:
+        self.assertEqual(
+            self.command(
+                "/settings",
+                action_word="Nuke",
+                nicknames={6: "Juan"},
+                post_minute=21 * 60,
+                retention_days=5,
+            ),
+            "Action word: Nuke\nDaily post: 21:00\nDuplicate window: 5 days\n"
+            "Nickname 6: Juan",
+        )
+
+    def test_setting_commands_store_their_values(self) -> None:
+        self.assertEqual(self.command("/actionword Gulag"), "Action word: Gulag")
+        self.assertEqual(self.command("/posttime 9:05"), "Daily post: 09:05")
+        self.assertEqual(self.command("/retention 7"), "Duplicate window: 7 days")
+        self.assertEqual(self.store.setting("action_word"), "Gulag")
+        self.assertEqual(self.store.setting("post_at"), "09:05")
+        self.assertEqual(self.store.setting("retention_days"), "7")
+
+        self.assertEqual(self.command("/actionword off"), "Action word: off")
+        self.assertEqual(self.command("/posttime OFF"), "Daily post: off")
+        self.assertEqual(self.store.setting("action_word"), "off")
+        self.assertEqual(self.store.setting("post_at"), "off")
+
+    def test_a_command_without_an_argument_only_shows_the_value(self) -> None:
+        self.assertEqual(
+            self.command("/actionword", action_word="Nuke"), "Action word: Nuke"
+        )
+        self.assertEqual(self.command("/retention"), "Duplicate window: 5 days")
+        self.assertIsNone(self.store.setting("action_word"))
+        self.assertIsNone(self.store.setting("retention_days"))
+
+    def test_invalid_setting_values_are_refused(self) -> None:
+        for text in ("/posttime 25:00", "/posttime soon", "/retention 0", "/retention -1"):
+            with self.subTest(text=text):
+                self.assertTrue(self.command(text).startswith("Use "))
+        self.assertIsNone(self.store.setting("post_at"))
+        self.assertIsNone(self.store.setting("retention_days"))
+
+    def test_nickname_names_the_sender_or_whoever_they_reply_to(self) -> None:
+        self.assertEqual(self.command("/nickname Ali"), "Alice is now Ali.")
+        bob = {"id": 6, "first_name": "Bob"}
+        self.assertEqual(self.command("/nickname Juan", reply_to=bob), "Bob is now Juan.")
+        self.assertEqual(self.store.nicknames(), {5: "Ali", 6: "Juan"})
+
+        self.assertEqual(
+            self.command("/nickname", reply_to=bob, nicknames={6: "Juan"}),
+            "Bob goes by Juan.",
+        )
+        self.assertEqual(
+            self.command("/nickname off", reply_to=bob), "Bob has no nickname now."
+        )
+        self.assertEqual(self.store.nicknames(), {5: "Ali", 6: ""})
+
+    def test_settings_change_only_in_the_board_group(self) -> None:
+        self.command("/actionword Gulag", chat={"id": OTHER_GROUP, "type": "supergroup"})
+        self.assertEqual(self.client.sent, [])
+        self.assertEqual(
+            self.command("/actionword Gulag", chat={"id": DM, "type": "private"}),
+            "Change settings in the group chat.",
+        )
+        self.assertIsNone(self.store.setting("action_word"))
+
     def test_a_nickname_replaces_the_name_in_the_callout(self) -> None:
         first = {
             "chat": {"id": GROUP, "type": "supergroup"},
@@ -1106,6 +1202,49 @@ class RunPollingTests(unittest.TestCase):
         self.assertEqual(len(self.client.sent), 2)
         self.assertEqual(self.poll.call_args.kwargs["offset"], 12)
         self.assertEqual(reminders.call_count, 2)
+
+    def test_stored_settings_override_the_environment_without_a_restart(self) -> None:
+        def share(update_id: int, user_id: int, name: str) -> dict:
+            return {
+                "update_id": update_id,
+                "message": {
+                    "chat": {"id": GROUP, "type": "supergroup"},
+                    "message_id": update_id,
+                    "date": 2_000_000_000 + update_id,
+                    "from": {"id": user_id, "first_name": name},
+                    "text": "https://x.com/someone/status/123",
+                },
+            }
+
+        command = {
+            "update_id": 10,
+            "message": {
+                "chat": {"id": GROUP, "type": "supergroup"},
+                "message_id": 10,
+                "date": 2_000_000_000,
+                "from": {"id": 5, "first_name": "Alice"},
+                "text": "/actionword Gulag",
+                "entities": command_entity("/actionword Gulag"),
+            },
+        }
+        self.store.set_nickname(user_id=6, nickname="Juan")
+        self.store.set_setting("post_at", "off")
+        self.store.set_setting("retention_days", "9")
+        self.poll.side_effect = [
+            [command, share(11, 5, "Alice"), share(12, 6, "Bob")], KeyboardInterrupt(),
+        ]
+        with (
+            patch("sfbot.telegram.post_due_leaderboard") as posts,
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            run_polling(
+                self.client, self.cache, self.store,
+                board_chat_id=GROUP, post_minute=21 * 60, action_word="Nuke",
+            )
+
+        self.assertIn((GROUP, "Let's drop a /SendJuanToGulag"), self.client.sent)
+        self.assertEqual(self.cache.retention_seconds, 9 * 24 * 60 * 60)
+        posts.assert_not_called()
 
 
 class TelegramClientTests(unittest.TestCase):

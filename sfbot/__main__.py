@@ -159,6 +159,7 @@ def main() -> None:
             action_word=action_word,
             nicknames=nicknames,
             absent_chud_user_id=absent_chud_user_id,
+            retention_days=retention_days,
         )
 
 

@@ -230,6 +230,18 @@ class LeaderboardStoreTests(unittest.TestCase):
             board = store.standings(chat_id=-100, local_date=DAY)[0]
             self.assertEqual(board.entries[0].detail, "")
 
+    def test_settings_and_nicknames_survive_reopen(self) -> None:
+        self.assertIsNone(self.store.setting("action_word"))
+        self.store.set_setting("action_word", "Nuke")
+        self.store.set_setting("action_word", "Gulag")
+        self.store.set_nickname(user_id=5, nickname="Juan")
+        self.store.set_nickname(user_id=6, nickname="")
+        self.store.close()
+
+        self.store = LeaderboardStore(Path(self.temp_dir.name) / "sfbot.db")
+        self.assertEqual(self.store.setting("action_word"), "Gulag")
+        self.assertEqual(self.store.nicknames(), {5: "Juan", 6: ""})
+
     def test_a_different_game_from_the_same_person_is_accepted(self) -> None:
         self.assertTrue(self.record("Alice", wordle("3/6", 3), user_id=5))
         connections = ParsedResult(
