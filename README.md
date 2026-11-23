@@ -20,7 +20,19 @@ Setting `SFBOT_ACTION_WORD` adds a callout naming whoever reposted. With
 sf @Bob                                     (a reply to Alice's message)
 Uh oh! Looks like Bob's getting *Sent to Nuke*
 Let's drop a /SendBobToNuke
+SF leaderboard
+1. Bob - 🏆🆕 1 SF
 ```
+
+Each successful SF adds one to the repeat poster's lifetime count in that chat.
+The SF leaderboard is the final message in the response. 🏆 marks the leader
+(or tied leaders), and 🆕 marks the count that just increased. Both appear in
+the same column beside the count. `/sf` shows the
+same leaderboard on demand without 🆕. The SF leaderboard is separate from the
+daily games post and is never included in that scheduled post. In a group,
+`/sf` shows that group's counts; in a DM, it shows the configured games group's
+counts after the sender has been seen in that group. Counts start when this
+feature is installed; earlier SF replies cannot be reconstructed.
 
 The past tense is the word plus `d`, so the word is expected to end in `e`. The
 asterisks are literal: the bot sends no `parse_mode`, so nothing in a display
@@ -262,6 +274,7 @@ player's latest submission that day, unless overridden by a nickname.
 | `/chad`, `/chud` | The saved announcement for today, or a note that it is not decided yet |
 | `/daily` | Today's saved final ranking and placement scores after the daily post |
 | `/overall` | Each participant's total CHADs and CHUDs, plus 🔥 CHAD or 💩 CHUD streaks only while active |
+| `/sf` | Lifetime SF counts for the group, separate from the daily games post |
 
 Commands reply where you ask; a DM check stays private. In groups, standings,
 announcements, and submissions are available only in the configured leaderboard

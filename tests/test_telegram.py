@@ -210,6 +210,7 @@ class HandleMessageTests(unittest.TestCase):
             [
                 (GROUP, "Uh oh! Looks like Alice's getting *Sent to Nuke*"),
                 (GROUP, "Let's drop a /SendAliceToNuke"),
+                (GROUP, "SF leaderboard\n1. Alice - 🏆🆕 1 SF"),
             ],
         )
 
@@ -239,6 +240,7 @@ class HandleMessageTests(unittest.TestCase):
             [
                 (GROUP, "Uh oh! Looks like Bob's getting *Sent to Nuke*"),
                 (GROUP, "Let's drop a /SendBobToNuke"),
+                (GROUP, "SF leaderboard\n1. Bob - 🏆🆕 1 SF"),
             ],
         )
 
@@ -266,6 +268,7 @@ class HandleMessageTests(unittest.TestCase):
             [
                 (GROUP, "Uh oh! Looks like Juan's getting *Sent to Nuke*"),
                 (GROUP, "Let's drop a /SendJuanToNuke"),
+                (GROUP, "SF leaderboard\n1. Juan - 🏆🆕 1 SF"),
             ],
         )
 
@@ -317,7 +320,8 @@ class HandleMessageTests(unittest.TestCase):
 
         self.assertEqual(len(self.client.replies), 2)
         self.assertEqual([reply[1] for reply in self.client.replies], [41, 41])
-        self.assertEqual(len(self.client.sent), 4)
+        self.assertEqual(len(self.client.sent), 6)
+        self.assertEqual(self.store.sf_ranking(chat_id=GROUP)[0].count, 2)
 
     def test_failed_callout_does_not_repeat_sf_on_update_replay(self) -> None:
         original = {
@@ -377,7 +381,69 @@ class HandleMessageTests(unittest.TestCase):
             self.client.replies,
             [(GROUP, 41, {"id": 6, "first_name": "Bob"})],
         )
-        self.assertEqual(self.client.sent, [])
+        self.assertEqual(self.client.sent, [(GROUP, "SF leaderboard\n1. Bob - 🏆🆕 1 SF")])
+
+    def test_sf_command_shows_totals_without_update_marks(self) -> None:
+        first = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": "https://x.com/someone/status/123",
+        }
+        self.handle(first)
+        self.handle({**first, "message_id": 42, "from": {"id": 6, "first_name": "Bob"}})
+        self.handle({**first, "message_id": 43, "from": {"id": 5, "first_name": "Alice"}})
+        self.assertEqual(
+            self.client.sent[-1],
+            (GROUP, "SF leaderboard\n1. Alice - 🏆🆕 1 SF\n1. Bob   - 🏆   1 SF"),
+        )
+
+        command = "/sf@sfbot"
+        self.handle({
+            "chat": {"id": DM, "type": "private"},
+            "message_id": 50,
+            "date": 2_000_000_100,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": command,
+            "entities": command_entity(command),
+        }, nicknames={6: "Bobby"})
+        self.assertEqual(
+            self.client.sent[-1],
+            (DM, "SF leaderboard\n1. Alice - 🏆   1 SF\n1. Bobby - 🏆   1 SF"),
+        )
+        self.assertEqual(self.client.sent_entities[-1][0]["type"], "pre")
+
+    def test_sf_trophy_stays_with_leader_when_another_count_increases(self) -> None:
+        original = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": "https://x.com/someone/status/123",
+        }
+        self.handle(original)
+        self.handle({**original, "message_id": 42, "from": {"id": 6, "first_name": "Bob"}})
+        self.handle({**original, "message_id": 43, "from": {"id": 6, "first_name": "Bob"}})
+        self.handle({**original, "message_id": 44})
+        self.assertEqual(
+            self.client.sent[-1],
+            (GROUP, "SF leaderboard\n1. Bob   - 🏆   2 SFs\n2. Alice - 🆕   1 SF"),
+        )
+
+    def test_sf_command_uses_the_chat_where_it_was_asked(self) -> None:
+        command = "/sf"
+        self.handle({
+            "chat": {"id": OTHER_GROUP, "type": "supergroup"},
+            "message_id": 1,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": command,
+            "entities": command_entity(command),
+        })
+        self.assertEqual(
+            self.client.sent[-1], (OTHER_GROUP, "No SFs have been recorded yet.")
+        )
 
     def test_deleted_origin_promotes_current_message(self) -> None:
         first = {

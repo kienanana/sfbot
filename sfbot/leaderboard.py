@@ -60,6 +60,13 @@ class OverallRank:
     chud_streak: int
 
 
+@dataclass(frozen=True, slots=True)
+class SFRank:
+    user_id: int
+    display_name: str
+    count: int
+
+
 class LeaderboardStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -145,7 +152,61 @@ class LeaderboardStore:
             ) WITHOUT ROWID
             """
         )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sf_events (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                tweet_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                display_name TEXT NOT NULL,
+                PRIMARY KEY (chat_id, message_id, tweet_id)
+            ) WITHOUT ROWID
+            """
+        )
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS sf_events_ranking ON sf_events (chat_id, user_id)"
+        )
         self._connection.commit()
+
+    def record_sf(
+        self, *, chat_id: int, message_id: int, tweet_id: str,
+        user_id: int, display_name: str,
+    ) -> bool:
+        """Record one successful SF, even if an update is processed again."""
+
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """INSERT OR IGNORE INTO sf_events
+                   (chat_id, message_id, tweet_id, user_id, display_name)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (chat_id, message_id, tweet_id, user_id, display_name),
+            )
+            return cursor.rowcount == 1
+
+    def sf_ranking(
+        self, *, chat_id: int, nicknames: Mapping[int, str] | None = None
+    ) -> list[SFRank]:
+        """Return lifetime SF totals in this chat, highest first."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT user_id, COUNT(*) FROM sf_events
+                   WHERE chat_id = ? GROUP BY user_id""",
+                (chat_id,),
+            ).fetchall()
+            names = self._connection.execute(
+                """SELECT user_id, display_name FROM sf_events
+                   WHERE chat_id = ? ORDER BY message_id""",
+                (chat_id,),
+            ).fetchall()
+        latest = {int(user_id): str(name) for user_id, name in names}
+        overrides = nicknames or {}
+        ranking = [
+            SFRank(int(user_id), overrides.get(int(user_id), latest[int(user_id)]), int(count))
+            for user_id, count in rows
+        ]
+        return sorted(ranking, key=lambda rank: (-rank.count, rank.display_name.casefold(), rank.user_id))
 
     def remember_member(self, *, chat_id: int, user_id: int, seen_at: int) -> None:
         """Record that a user was seen in the group, which lets them submit by DM."""
@@ -907,6 +968,35 @@ def format_overall_ranking(ranking: Sequence[OverallRank]) -> str:
         elif rank.chud_streak > 0:
             parts.append(f"💩 {rank.chud_streak:>{streak_width}}")
         lines.append("  ".join(parts))
+    return "\n".join(lines)
+
+
+def format_sf_ranking(
+    ranking: Sequence[SFRank], *, updated_user_id: int | None = None
+) -> str:
+    """Render SF totals, marking leaders and the latest updated count."""
+
+    if not ranking:
+        return "No SFs have been recorded yet."
+    lines = ["SF leaderboard"]
+    place_width = len(str(len(ranking)))
+    name_width = max(len(rank.display_name) for rank in ranking)
+    count_width = max(len(str(rank.count)) for rank in ranking)
+    place = 0
+    previous_count: int | None = None
+    for index, rank in enumerate(ranking, start=1):
+        if rank.count != previous_count:
+            place = index
+            previous_count = rank.count
+        markers = ("🏆" if place == 1 else "") + (
+            "🆕" if rank.user_id == updated_user_id else ""
+        )
+        marker_column = markers + " " * (4 - 2 * len(markers))
+        lines.append(
+            f"{place:>{place_width}}. {rank.display_name:<{name_width}}"
+            f" - {marker_column} {rank.count:>{count_width}}"
+            f" {'SF' if rank.count == 1 else 'SFs'}"
+        )
     return "\n".join(lines)
 
 
