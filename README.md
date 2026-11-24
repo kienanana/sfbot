@@ -199,6 +199,13 @@ docker compose up -d --build
 make logs
 ```
 
+When a rebuilt bot starts, it posts a changelog to the leaderboard group: the
+title of each pull request merged to `main` since the last version it announced.
+The image records the last 30 commits on `main`'s first-parent history at build
+time, so build from a clone with its `.git` folder. The first start only records
+the version, so a fresh install does not post the whole history. Set
+`SFBOT_CHANGELOG_PATH` empty to turn the changelog off.
+
 ## One-bot development workflow
 
 Never run the homelab and local instances simultaneously. Before a live local
