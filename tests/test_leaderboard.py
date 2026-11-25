@@ -242,6 +242,15 @@ class LeaderboardStoreTests(unittest.TestCase):
         self.assertEqual(self.store.setting("action_word"), "Gulag")
         self.assertEqual(self.store.nicknames(), {5: "Juan", 6: ""})
 
+    def test_message_sets_are_seeded_once_so_deletions_stick(self) -> None:
+        self.assertEqual(self.store.message_lines("chad-group"), ["are you guys poly? 👀"])
+        self.store.delete_message_line("chad-group", 1)
+        self.store.add_message_line("chad-group", "a tie!")
+        self.store.close()
+
+        self.store = LeaderboardStore(Path(self.temp_dir.name) / "sfbot.db")
+        self.assertEqual(self.store.message_lines("chad-group"), ["a tie!"])
+
     def test_a_different_game_from_the_same_person_is_accepted(self) -> None:
         self.assertTrue(self.record("Alice", wordle("3/6", 3), user_id=5))
         connections = ParsedResult(
