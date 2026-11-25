@@ -6,22 +6,26 @@ from dataclasses import replace
 
 import json
 import logging
+import random
+import re
 import time
 import urllib.error
 import urllib.request
 import zlib
 from collections.abc import Mapping, Sequence
+from datetime import date, timedelta
 from types import MappingProxyType
 from typing import Any
 
 from .cache import DuplicateCache
 from .games import GAMES, expected_puzzle, parse_result
 from .leaderboard import (
+    MESSAGE_SETS,
+    PERSONAL_SETS,
     GameStandings,
     LeaderboardStore,
     PostedAnnouncement,
     Winner,
-    absent_chud_winners,
     apply_nicknames,
     chad_winners,
     chud_winners,
@@ -36,17 +40,31 @@ from .leaderboard import (
     format_standings,
 )
 from .links import extract_tweet_ids
-from .times import due_post_date, due_reminder_date, local_date
+from .times import due_post_date, due_reminder_date, local_date, parse_daily_time
 
 LOG = logging.getLogger(__name__)
 
 _LEADERBOARD_COMMAND = "/leaderboard"
 _GAMES_COMMAND = "/games"
+_SCORE_SYSTEM_COMMAND = "/scoresystem"
 _CHAD_COMMAND = "/chad"
 _CHUD_COMMAND = "/chud"
 _DAILY_COMMAND = "/daily"
 _OVERALL_COMMAND = "/overall"
 _SF_COMMAND = "/sf"
+_SETTINGS_COMMAND = "/settings"
+_ACTION_WORD_COMMAND = "/actionword"
+_NICKNAME_COMMAND = "/nickname"
+_POST_TIME_COMMAND = "/posttime"
+_RETENTION_COMMAND = "/retention"
+_MONTHLY_RESET_COMMAND = "/monthlyreset"
+_RESET_OVERALL_COMMAND = "/resetoverall"
+_LINES_COMMAND = "/lines"
+_ADD_LINE_COMMAND = "/addline"
+_DELETE_LINE_COMMAND = "/delline"
+_NAMES_COMMAND = "/names"
+_CALLOUT_PLACEHOLDERS = {"name", "word"}
+_OFF = "off"
 _ACKNOWLEDGEMENT = "\N{THUMBS UP SIGN}"
 _UNKNOWN_SENDER = (
     "I don't have you on the group roster yet. Say anything in the group chat,"
@@ -179,18 +197,30 @@ class TelegramClient:
         )
 
 
-def _callout(action_word: str, display_name: str) -> list[str]:
-    """Return the lines that name the repeat poster after the `sf` reply.
+def _callout(
+    template: str, action_word: str, display_name: str
+) -> list[tuple[str, list[dict[str, object]]]]:
+    """Return the lines, with their entities, that name the repeat poster.
 
-    Sent without a parse_mode like everything else the bot says, so the
-    asterisks show up literally and no display name needs escaping.
+    Text between asterisks in the template is sent as a bold entity rather
+    than through a parse_mode, so no display name needs escaping. A template
+    with unpaired asterisks keeps them as written.
     """
 
+    parts = re.split(r"\*+", template)
+    if len(parts) % 2 == 0:
+        parts = [template]
+    text = ""
+    entities: list[dict[str, object]] = []
+    for index, part in enumerate(parts):
+        part = part.replace("{name}", display_name).replace("{word}", action_word)
+        if index % 2 and part:
+            entities.append(
+                {"type": "bold", "offset": _utf16_length(text), "length": _utf16_length(part)}
+            )
+        text += part
     handle = "".join(display_name.split())
-    return [
-        f"Uh oh! Looks like {display_name}'s getting *Sent to {action_word}*",
-        f"Let's drop a /Send{handle}To{action_word}",
-    ]
+    return [(text, entities), (f"Let's drop a /Send{handle}To{action_word}", [])]
 
 
 def _message_body(message: Mapping[str, object]) -> str:
@@ -222,6 +252,21 @@ def _games_message() -> tuple[str, list[dict[str, object]]]:
         )
         text += prefix + game.name
     return text, entities
+
+
+_SCORE_SYSTEM = """How the day is scored
+
+Each game's board ranks its players best first, and ties share a placing: two players tied for first both place 1, and the next places 3. Your day score is your average placing over the games you played, plus 0.5 for each game you skipped. Lower is better. The best day score is CHAD and the worst is CHUD; ties share the title.
+
+The average keeps one bad game from sinking a good day, and the 0.5 a skip costs is half of what one place lower on that board would. So skipping still hurts, but finishing every game is no longer the only way to win.
+
+Wordle: fewer guesses is better, and X/6 is last. Hard mode (a * after the score) makes every guess reuse the hints so far, so the same count is a better result there. Each result ranks by where it falls among a solver's results in its own mode: the share of games it beats, counting half of those it ties. The solver played every answer from eleven common openers, in each mode. That puts 3/6* ahead of 3/6, 4/6* ahead of 4/6, and so on, while 3/6 still beats 4/6*. Hard mode never ranks below the same count in normal mode, and 1/6, 2/6 and X/6 tie across modes.
+
+Connections: fewer mistakes is better, and four mistakes is a loss. Within the same mistakes, each unsolved category costs 0.1, then a solve order that leaves the harder colours (purple, then blue) until later costs a little more. Neither adjustment adds up to one mistake.
+
+Krillion: a deeper dive is better.
+
+Fermi: the score is how far off your guesses were, so 1× is perfect and lower is better."""
 
 
 def _leading_command(message: Mapping[str, object]) -> str | None:
@@ -416,9 +461,12 @@ def _render_announcement(
                 announcement.winners,
                 variation=_chad_variation(board_chat_id, day),
                 nicknames=nicknames,
+                line=announcement.line,
             )
         else:
-            rendered = format_chud_winners(announcement.winners, nicknames=nicknames)
+            rendered = format_chud_winners(
+                announcement.winners, nicknames=nicknames, line=announcement.line
+            )
         return _with_streaks(
             rendered,
             store=store,
@@ -459,7 +507,11 @@ def _with_streaks(
     if message is None:
         return None
     streaks = store.title_streaks(
-        chat_id=board_chat_id, local_date=day, winners=winners, is_chad=is_chad
+        chat_id=board_chat_id,
+        local_date=day,
+        winners=winners,
+        is_chad=is_chad,
+        since=store.setting("season_start"),
     )
     emoji, title = ("🔥", "CHAD") if is_chad else ("💩", "CHUD")
     lines = [
@@ -468,6 +520,312 @@ def _with_streaks(
         if (length := streaks[user_id]) > 1
     ]
     return message + ("\n" + "\n".join(lines) if lines else "")
+
+
+def _clock(minute: int | None) -> str:
+    return _OFF if minute is None else f"{minute // 60:02}:{minute % 60:02}"
+
+
+def _on_off(value: bool) -> str:
+    return "on" if value else _OFF
+
+
+def _change_setting(
+    message: Mapping[str, object],
+    command: str,
+    *,
+    store: LeaderboardStore,
+    action_word: str | None,
+    nicknames: Mapping[int, str],
+    post_minute: int | None,
+    retention_days: int,
+    monthly_reset: bool,
+) -> str:
+    """Apply a settings command and return the reply describing the result.
+
+    Without an argument a command only shows its current value.
+    """
+
+    parts = _message_body(message).split(maxsplit=1)
+    argument = parts[1].strip() if len(parts) > 1 else ""
+    switch_off = argument.lower() == _OFF
+
+    if command == _SETTINGS_COMMAND:
+        lines = [
+            f"Action word: {action_word or _OFF}",
+            f"Daily post: {_clock(post_minute)}",
+            f"Duplicate window: {retention_days} days",
+            f"Monthly /overall reset: {_on_off(monthly_reset)}",
+        ]
+        lines += [f"Nickname {user_id}: {name}" for user_id, name in nicknames.items()]
+        return "\n".join(lines)
+
+    if command == _ACTION_WORD_COMMAND:
+        if argument:
+            store.set_setting("action_word", _OFF if switch_off else argument)
+            action_word = None if switch_off else argument
+        return f"Action word: {action_word or _OFF}"
+
+    if command == _NICKNAME_COMMAND:
+        # Replying to someone names them; otherwise the sender names themselves.
+        reply = message.get("reply_to_message")
+        target = _sender(reply if isinstance(reply, Mapping) else message, {})
+        if target is None:
+            return "I can't tell whose nickname that is."
+        user_id, telegram_name = target
+        if argument:
+            store.set_nickname(user_id=user_id, nickname="" if switch_off else argument)
+            return (
+                f"{telegram_name} has no nickname now."
+                if switch_off
+                else f"{telegram_name} is now {argument}."
+            )
+        nickname = nicknames.get(user_id)
+        return (
+            f"{telegram_name} goes by {nickname}."
+            if nickname
+            else f"{telegram_name} has no nickname."
+        )
+
+    if command == _POST_TIME_COMMAND:
+        if argument:
+            try:
+                post_minute = None if switch_off else parse_daily_time(argument)
+            except ValueError:
+                return "Use HH:MM, for example /posttime 21:00, or off."
+            store.set_setting("post_at", _clock(post_minute))
+        return f"Daily post: {_clock(post_minute)}"
+
+    if command == _MONTHLY_RESET_COMMAND:
+        if argument:
+            if argument.lower() not in ("on", _OFF):
+                return "Use /monthlyreset on or /monthlyreset off."
+            monthly_reset = argument.lower() == "on"
+            store.set_setting("monthly_reset", _on_off(monthly_reset))
+        return f"Monthly /overall reset: {_on_off(monthly_reset)}"
+
+    if argument:
+        if not argument.isdigit() or int(argument) == 0:
+            return "Use a whole number of days, for example /retention 5."
+        retention_days = int(argument)
+        store.set_setting("retention_days", str(retention_days))
+    return f"Duplicate window: {retention_days} days"
+
+
+def _names(
+    store: LeaderboardStore, board_chat_id: int, nicknames: Mapping[int, str]
+) -> dict[int, list[str]]:
+    """Return every name each group member answers to: nickname, Telegram name,
+    and username, in that order."""
+
+    people: dict[int, list[str]] = {}
+    for user_id, (name, username) in store.member_names(chat_id=board_chat_id).items():
+        labels = [nicknames.get(user_id), name, username]
+        people[user_id] = list(dict.fromkeys(label for label in labels if label))
+    return people
+
+
+def _names_text(
+    store: LeaderboardStore, board_chat_id: int, nicknames: Mapping[int, str]
+) -> str:
+    rows = []
+    for labels in _names(store, board_chat_id, nicknames).values():
+        if labels:
+            others = ", ".join(labels[1:])
+            rows.append(f"{labels[0]} ({others})" if others else labels[0])
+    if not rows:
+        return "Nobody's on the roster yet."
+    return "Names to use after @ in /lines, /addline and /delline:\n" + "\n".join(
+        sorted(rows, key=str.lower)
+    )
+
+
+def _person(
+    text: str,
+    *,
+    store: LeaderboardStore,
+    board_chat_id: int,
+    nicknames: Mapping[int, str],
+) -> tuple[int, str, str] | str:
+    """Find who an @name at the start of text means, by nickname, Telegram name or
+    username. Returns their ID, the name to show, and the rest of the text, or a
+    reply explaining why nobody matched. The longest matching name wins, so a
+    name with spaces is read whole."""
+
+    lowered = text.lower()
+    matches: dict[int, int] = {}
+    people = _names(store, board_chat_id, nicknames)
+    for user_id, labels in people.items():
+        for label in labels:
+            label = label.lower()
+            if lowered == label or lowered.startswith(label + " "):
+                matches[user_id] = max(matches.get(user_id, 0), len(label))
+    if not matches:
+        return "I don't know who that is. /names lists the names I know."
+    longest = max(matches.values())
+    matched = [user_id for user_id, length in matches.items() if length == longest]
+    if len(matched) > 1:
+        return "That name fits more than one person. /names lists the others to use."
+    user_id = matched[0]
+    return user_id, people[user_id][0], text[longest:].strip()
+
+
+def _edit_lines(
+    message: Mapping[str, object],
+    command: str,
+    *,
+    store: LeaderboardStore,
+    board_chat_id: int,
+    nicknames: Mapping[int, str],
+) -> str:
+    """List, add to, or delete from a message set, returning the reply.
+
+    An @name after chad or chud works on that person's own lines instead.
+    """
+
+    parts = _message_body(message).split(maxsplit=2)
+    set_name = parts[1].lower() if len(parts) > 1 else ""
+    argument = parts[2].strip() if len(parts) > 2 else ""
+    if set_name not in MESSAGE_SETS:
+        return (
+            f"Name a set: {', '.join(MESSAGE_SETS)}. For example /lines callout,"
+            " or /lines chad @name for someone's own lines."
+        )
+    key = label = set_name
+    personal = argument.startswith("@")
+    if personal:
+        if set_name not in PERSONAL_SETS:
+            return f"Only {' and '.join(PERSONAL_SETS)} lines can belong to someone."
+        person = _person(
+            argument[1:], store=store, board_chat_id=board_chat_id, nicknames=nicknames
+        )
+        if isinstance(person, str):
+            return person
+        user_id, name, argument = person
+        key, label = f"{set_name}:{user_id}", f"{name}'s {set_name} lines"
+    lines = store.message_lines(key)
+
+    if command == _LINES_COMMAND:
+        if not lines:
+            return f"No {label} yet."
+        return "\n".join(f"{number}. {line}" for number, line in enumerate(lines, 1))
+
+    if command == _ADD_LINE_COMMAND:
+        if not argument:
+            return f"Add the line after the set, for example /addline {set_name} wahoo!"
+        unknown = set(re.findall(r"\{([^{}]*)\}", argument)) - _CALLOUT_PLACEHOLDERS
+        if set_name == "callout" and unknown:
+            return "A callout line can use only {name} and {word}."
+        store.add_message_line(key, argument)
+        return f"Added to {label}: {argument}"
+
+    if not argument.isdigit() or not 1 <= int(argument) <= len(lines):
+        return f"Use a line number from /lines {set_name}{' @name' if personal else ''}."
+    # Someone's own lines can run out; the group's always need one to draw on.
+    if len(lines) == 1 and not personal:
+        return f"That's the last line in {set_name}. Add another before deleting it."
+    store.delete_message_line(key, int(argument))
+    return f"Deleted from {label}: {lines[int(argument) - 1]}"
+
+
+def _chad_line(
+    store: LeaderboardStore, chat_id: int, day: str, winners: Sequence[Winner]
+) -> str:
+    lines = store.message_lines("chad") + store.message_lines(
+        "chad-solo" if len(winners) == 1 else "chad-group"
+    )
+    for user_id, _ in winners:
+        lines += store.message_lines(f"chad:{user_id}")
+    return lines[_chad_variation(chat_id, day) % len(lines)]
+
+
+def _chud_line(
+    store: LeaderboardStore, chat_id: int, day: str, winners: Sequence[Winner]
+) -> str:
+    lines = store.message_lines("chud")
+    for user_id, _ in winners:
+        lines += store.message_lines(f"chud:{user_id}")
+    return lines[_chad_variation(chat_id, day) % len(lines)]
+
+
+def _current_settings(
+    store: LeaderboardStore,
+    *,
+    action_word: str | None,
+    nicknames: Mapping[int, str],
+    post_minute: int | None,
+    retention_days: int,
+) -> dict[str, Any]:
+    """Overlay what the group set by command on the environment's defaults.
+
+    Monthly /overall resets have no environment setting and default to on.
+    """
+
+    stored_word = store.setting("action_word")
+    if stored_word is not None:
+        action_word = None if stored_word == _OFF else stored_word
+    stored_time = store.setting("post_at")
+    if stored_time is not None:
+        post_minute = None if stored_time == _OFF else parse_daily_time(stored_time)
+    stored_retention = store.setting("retention_days")
+    if stored_retention is not None:
+        retention_days = int(stored_retention)
+    return {
+        "action_word": action_word,
+        "nicknames": {
+            user_id: name
+            for user_id, name in {**nicknames, **store.nicknames()}.items()
+            if name
+        },
+        "post_minute": post_minute,
+        "retention_days": retention_days,
+        "monthly_reset": store.setting("monthly_reset") != _OFF,
+    }
+
+
+def _overall_heading(since: str | None, *, final: bool = False) -> str:
+    heading = "Final overall leaderboard" if final else "Overall leaderboard"
+    return f"{heading} since {since}" if since else heading
+
+
+def _send_overall(client: TelegramClient, chat_id: int, text: str) -> None:
+    heading, separator, body = text.partition("\n")
+    entities = None
+    if separator:
+        # Telegram needs monospace text for the padded columns to align.
+        entities = [{
+            "type": "pre",
+            "offset": _utf16_length(heading + separator),
+            "length": _utf16_length(body),
+        }]
+    client.send_message(chat_id=chat_id, text=text, entities=entities)
+
+
+def _reset_overall(
+    client: TelegramClient,
+    store: LeaderboardStore,
+    *,
+    board_chat_id: int,
+    start: str,
+    nicknames: Mapping[int, str],
+) -> None:
+    """Post the closing season's standings, then count titles from ``start``."""
+
+    since = store.setting("season_start")
+    ranking = store.overall_ranking(
+        chat_id=board_chat_id, nicknames=nicknames, since=since
+    )
+    # Everyone who played is ranked, so an empty season still has rows.
+    if any(rank.chads or rank.chuds for rank in ranking):
+        _send_overall(
+            client,
+            board_chat_id,
+            format_overall_ranking(ranking, heading=_overall_heading(since, final=True)),
+        )
+    store.set_setting("season_start", start)
+    client.send_message(
+        chat_id=board_chat_id, text=f"Overall totals reset. Counting from {start}."
+    )
 
 
 def handle_message(
@@ -480,6 +838,9 @@ def handle_message(
     board_chat_id: int | None,
     action_word: str | None = None,
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
+    post_minute: int | None = None,
+    retention_days: int = 5,
+    monthly_reset: bool = True,
 ) -> None:
     chat = message.get("chat")
     if not isinstance(chat, Mapping) or not isinstance(chat.get("id"), int):
@@ -501,7 +862,16 @@ def handle_message(
     # direct message be trusted. Group Privacy is off, so ordinary chatter counts
     # and nobody has to post a result in the group to get on the roster.
     if is_board_group and sender is not None:
-        store.remember_member(chat_id=board_chat_id, user_id=sender[0], seen_at=seen_at)
+        raw = message["from"]
+        assert isinstance(raw, Mapping)
+        name, username = raw.get("first_name"), raw.get("username")
+        store.remember_member(
+            chat_id=board_chat_id,
+            user_id=sender[0],
+            seen_at=seen_at,
+            name=name if isinstance(name, str) and name else None,
+            username=username if isinstance(username, str) and username else None,
+        )
 
     command = _leading_command(message)
     if command == _GAMES_COMMAND:
@@ -521,6 +891,68 @@ def handle_message(
             client, store, board_chat_id=sf_chat_id,
             to_chat_id=chat_id, nicknames=nicknames,
         )
+        return
+
+    if command == _SCORE_SYSTEM_COMMAND:
+        client.send_message(chat_id=chat_id, text=_SCORE_SYSTEM)
+        return
+
+    if command in (_LINES_COMMAND, _ADD_LINE_COMMAND, _DELETE_LINE_COMMAND, _NAMES_COMMAND):
+        # Lines and names work by DM too, for anyone on the group's roster.
+        if board_chat_id is None or not (is_private or is_board_group):
+            return
+        if is_private and not (
+            sender is not None
+            and store.is_member(chat_id=board_chat_id, user_id=sender[0])
+        ):
+            client.send_message(chat_id=chat_id, text=_UNKNOWN_SENDER)
+            return
+        if command == _NAMES_COMMAND:
+            text = _names_text(store, board_chat_id, nicknames)
+        else:
+            text = _edit_lines(
+                message,
+                command,
+                store=store,
+                board_chat_id=board_chat_id,
+                nicknames=nicknames,
+            )
+        client.send_message(chat_id=chat_id, text=text)
+        return
+
+    if command in (
+        _SETTINGS_COMMAND,
+        _ACTION_WORD_COMMAND,
+        _NICKNAME_COMMAND,
+        _POST_TIME_COMMAND,
+        _RETENTION_COMMAND,
+        _MONTHLY_RESET_COMMAND,
+        _RESET_OVERALL_COMMAND,
+    ):
+        # Changes happen in the group only, so everyone sees them.
+        if is_private:
+            client.send_message(chat_id=chat_id, text="Change settings in the group chat.")
+        elif command == _RESET_OVERALL_COMMAND:
+            if is_board_group:
+                # A day already posted stays in the season it was posted in.
+                day = local_date(seen_at, utc_offset_minutes=utc_offset_minutes)
+                if store.posted_announcements(chat_id=chat_id, local_date=day):
+                    day = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+                _reset_overall(
+                    client, store, board_chat_id=chat_id, start=day, nicknames=nicknames
+                )
+        elif is_board_group:
+            text = _change_setting(
+                message,
+                command,
+                store=store,
+                action_word=action_word,
+                nicknames=nicknames,
+                post_minute=post_minute,
+                retention_days=retention_days,
+                monthly_reset=monthly_reset,
+            )
+            client.send_message(chat_id=chat_id, text=text)
         return
 
     if command in (
@@ -561,21 +993,14 @@ def handle_message(
             return
 
         if command == _OVERALL_COMMAND:
-            ranking = store.overall_ranking(chat_id=board_chat_id, nicknames=nicknames)
-            text = format_overall_ranking(ranking)
-            heading, separator, body = text.partition("\n")
-            entities = None
-            if separator:
-                # Telegram needs monospace text for the padded columns to align.
-                entities = [{
-                    "type": "pre",
-                    "offset": _utf16_length(heading + separator),
-                    "length": _utf16_length(body),
-                }]
-            client.send_message(
-                chat_id=chat_id,
-                text=text,
-                entities=entities,
+            since = store.setting("season_start")
+            ranking = store.overall_ranking(
+                chat_id=board_chat_id, nicknames=nicknames, since=since
+            )
+            _send_overall(
+                client,
+                chat_id,
+                format_overall_ranking(ranking, heading=_overall_heading(since)),
             )
             return
 
@@ -694,8 +1119,9 @@ def handle_message(
         # The callout names whoever reposted, so it goes to the chat rather than
         # onto the original message it would otherwise seem to be about.
         if action_word and sender is not None:
-            for line in _callout(action_word, sender[1]):
-                client.send_message(chat_id=chat_id, text=line)
+            template = random.choice(store.message_lines("callout"))
+            for line, entities in _callout(template, action_word, sender[1]):
+                client.send_message(chat_id=chat_id, text=line, entities=entities)
 
         if updated_user_id is not None:
             _send_sf_ranking(
@@ -713,7 +1139,6 @@ def post_due_leaderboard(
     post_minute: int,
     now: int | None = None,
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
-    absent_chud_user_id: int | None = None,
 ) -> None:
     """Post the day's leaderboard to the group if it is owed one."""
 
@@ -747,25 +1172,10 @@ def post_due_leaderboard(
     )
     chads = chad_winners(recorded)
     chuds = chud_winners(recorded)
-    if absent_chud_user_id is not None:
-        # Sitting the day out decides the CHUD on its own. The nickname is what
-        # the day should remember them by; a name they submitted under before is
-        # the next best thing, since a no-show may have no results at all.
-        absent_name = (
-            nicknames.get(absent_chud_user_id)
-            or store.latest_name(chat_id=board_chat_id, user_id=absent_chud_user_id)
-            or str(absent_chud_user_id)
-        )
-        chuds = (
-            absent_chud_winners(
-                recorded, user_id=absent_chud_user_id, name=absent_name
-            )
-            or chuds
-        )
-    chad = format_chad_winners(
-        chads, variation=_chad_variation(board_chat_id, day), nicknames=nicknames
-    )
-    chud = format_chud_winners(chuds, nicknames=nicknames)
+    chad_line = _chad_line(store, board_chat_id, day, chads) if chads else None
+    chud_line = _chud_line(store, board_chat_id, day, chuds) if chuds else None
+    chad = format_chad_winners(chads, nicknames=nicknames, line=chad_line)
+    chud = format_chud_winners(chuds, nicknames=nicknames, line=chud_line)
     chad = _with_streaks(
         chad,
         store=store,
@@ -803,6 +1213,8 @@ def post_due_leaderboard(
         chad_winners=chads if chad is not None else None,
         chud_winners=chuds if chud is not None else None,
         daily_ranking=ranks,
+        chad_line=chad_line,
+        chud_line=chud_line,
     )
     LOG.info("Posted the %s leaderboard to chat %s", day, board_chat_id)
 
@@ -863,6 +1275,40 @@ def send_due_reminders(
     LOG.info("Sent the %s reminders for chat %s", day, board_chat_id)
 
 
+def reset_due_season(
+    client: TelegramClient,
+    store: LeaderboardStore,
+    *,
+    board_chat_id: int,
+    utc_offset_minutes: int,
+    monthly_reset: bool,
+    now: int | None = None,
+    nicknames: Mapping[int, str] = _NO_NICKNAMES,
+) -> None:
+    """Reset /overall on the first poll of a new month, if monthly resets are on.
+
+    The first month seen is only recorded, so turning this on mid-month, or a
+    first run, keeps the season going until the next month starts.
+    """
+
+    month = local_date(
+        int(time.time()) if now is None else now,
+        utc_offset_minutes=utc_offset_minutes,
+    )[:7]
+    seen = store.setting("season_month")
+    if seen == month:
+        return
+    if seen is not None and monthly_reset:
+        _reset_overall(
+            client,
+            store,
+            board_chat_id=board_chat_id,
+            start=f"{month}-01",
+            nicknames=nicknames,
+        )
+    store.set_setting("season_month", month)
+
+
 def run_polling(
     client: TelegramClient,
     cache: DuplicateCache,
@@ -874,7 +1320,7 @@ def run_polling(
     post_minute: int | None = None,
     action_word: str | None = None,
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
-    absent_chud_user_id: int | None = None,
+    retention_days: int = 5,
 ) -> None:
     offset: int | None = None
     poll_backoff = 1
@@ -883,23 +1329,43 @@ def run_polling(
         json.JSONDecodeError,
     )
 
+    def current_settings() -> dict[str, Any]:
+        # Read every time, so a command takes effect without a restart.
+        current = _current_settings(
+            store,
+            action_word=action_word,
+            nicknames=nicknames,
+            post_minute=post_minute,
+            retention_days=retention_days,
+        )
+        cache.retention_seconds = current["retention_days"] * 24 * 60 * 60
+        return current
+
     def run_scheduled_tasks() -> None:
-        if board_chat_id is None or post_minute is None:
+        current = current_settings()
+        if board_chat_id is None:
             return
-        # A failed reminder round must not prevent the daily post, and neither
-        # task may prevent incoming updates from being processed.
-        for name, task in (
-            ("reminders", send_due_reminders),
-            ("leaderboard", post_due_leaderboard),
-        ):
+        tasks: list[tuple[str, Any]] = []
+        if current["post_minute"] is not None:
+            tasks += [
+                ("reminders", send_due_reminders),
+                ("leaderboard", post_due_leaderboard),
+            ]
+        # After any late daily post, so the closing standings include it.
+        tasks.append(("season", reset_due_season))
+        # A failed reminder round must not prevent the daily post, and no task
+        # may prevent incoming updates from being processed.
+        for name, task in tasks:
             options: dict[str, Any] = {
                 "board_chat_id": board_chat_id,
                 "utc_offset_minutes": utc_offset_minutes,
-                "post_minute": post_minute,
             }
-            if name == "leaderboard":
-                options["nicknames"] = nicknames
-                options["absent_chud_user_id"] = absent_chud_user_id
+            if name == "season":
+                options["monthly_reset"] = current["monthly_reset"]
+            else:
+                options["post_minute"] = current["post_minute"]
+            if name in ("leaderboard", "season"):
+                options["nicknames"] = current["nicknames"]
             try:
                 task(client, store, **options)
             except request_errors as error:
@@ -941,8 +1407,7 @@ def run_polling(
                             client=client,
                             utc_offset_minutes=utc_offset_minutes,
                             board_chat_id=board_chat_id,
-                            action_word=action_word,
-                            nicknames=nicknames,
+                            **current_settings(),
                         )
                     except request_errors as error:
                         transient = not isinstance(error, TelegramAPIError) or (

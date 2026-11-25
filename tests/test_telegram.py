@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -7,10 +8,15 @@ from sfbot.cache import DuplicateCache
 from sfbot.games import parse_result
 from sfbot.leaderboard import LeaderboardStore
 from sfbot.telegram import (
+    _UNKNOWN_SENDER,
     TelegramAPIError,
+    _chad_line,
+    _chad_variation,
+    _chud_line,
     TelegramClient,
     handle_message,
     post_due_leaderboard,
+    reset_due_season,
     send_due_reminders,
     run_polling,
 )
@@ -208,7 +214,7 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(
             self.client.sent,
             [
-                (GROUP, "Uh oh! Looks like Alice's getting *Sent to Nuke*"),
+                (GROUP, "Uh oh! Looks like Alice's being Sent to Nuke"),
                 (GROUP, "Let's drop a /SendAliceToNuke"),
                 (GROUP, "SF leaderboard\n1. Alice - 🏆🆕 1 SF"),
             ],
@@ -238,11 +244,309 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(
             self.client.sent,
             [
-                (GROUP, "Uh oh! Looks like Bob's getting *Sent to Nuke*"),
+                (GROUP, "Uh oh! Looks like Bob's being Sent to Nuke"),
                 (GROUP, "Let's drop a /SendBobToNuke"),
                 (GROUP, "SF leaderboard\n1. Bob - 🏆🆕 1 SF"),
             ],
         )
+
+    def command(
+        self,
+        text: str,
+        *,
+        chat: dict[str, object] | None = None,
+        reply_to: dict[str, object] | None = None,
+        **settings: object,
+    ) -> str:
+        """Send a command from Alice and return the bot's last message."""
+
+        message: dict[str, object] = {
+            "chat": chat or {"id": GROUP, "type": "supergroup"},
+            "message_id": 50,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": text,
+            "entities": command_entity(text),
+        }
+        if reply_to is not None:
+            message["reply_to_message"] = {"message_id": 49, "from": reply_to}
+        handle_message(
+            message,  # type: ignore[arg-type]
+            cache=self.cache,
+            store=self.store,
+            client=self.client,
+            utc_offset_minutes=SGT_OFFSET,
+            board_chat_id=GROUP,
+            **settings,  # type: ignore[arg-type]
+        )
+        return self.client.sent[-1][1] if self.client.sent else ""
+
+    def test_settings_shows_the_current_values(self) -> None:
+        self.assertEqual(
+            self.command(
+                "/settings",
+                action_word="Nuke",
+                nicknames={6: "Juan"},
+                post_minute=21 * 60,
+                retention_days=5,
+            ),
+            "Action word: Nuke\nDaily post: 21:00\nDuplicate window: 5 days\n"
+            "Monthly /overall reset: on\nNickname 6: Juan",
+        )
+
+    def test_monthly_reset_turns_on_and_off(self) -> None:
+        self.assertEqual(self.command("/monthlyreset OFF"), "Monthly /overall reset: off")
+        self.assertEqual(self.store.setting("monthly_reset"), "off")
+        self.assertTrue(self.command("/monthlyreset maybe").startswith("Use "))
+        self.assertEqual(
+            self.command("/monthlyreset", monthly_reset=False), "Monthly /overall reset: off"
+        )
+        self.assertEqual(self.command("/monthlyreset on"), "Monthly /overall reset: on")
+        self.assertEqual(self.store.setting("monthly_reset"), "on")
+
+    def test_reset_overall_posts_the_final_standings_then_starts_today(self) -> None:
+        self.assertEqual(
+            self.command("/resetoverall"), "Overall totals reset. Counting from 2033-05-18."
+        )
+        self.assertEqual(len(self.client.sent), 1)
+
+        self.store.mark_posted(chat_id=GROUP, local_date="2033-05-16", chad_winners=[(5, "Alice")])
+        self.store.mark_posted(chat_id=GROUP, local_date="2033-05-18", chud_winners=[(6, "Bob")])
+        self.client.sent.clear()
+        # Today is already posted, so it stays in the closing season.
+        self.command("/resetoverall")
+        final = self.client.sent[0][1]
+        self.assertTrue(final.startswith("Final overall leaderboard since 2033-05-18\n"))
+        self.assertNotIn("Alice", final)
+        self.assertIn("Bob - 👑 0  🚽 1", final)
+        self.assertEqual(
+            self.client.sent[1][1], "Overall totals reset. Counting from 2033-05-19."
+        )
+        self.assertEqual(self.store.setting("season_start"), "2033-05-19")
+        self.assertEqual(
+            self.command("/overall"), "No CHAD or CHUD titles have been recorded yet."
+        )
+
+    def test_setting_commands_store_their_values(self) -> None:
+        self.assertEqual(self.command("/actionword Gulag"), "Action word: Gulag")
+        self.assertEqual(self.command("/posttime 9:05"), "Daily post: 09:05")
+        self.assertEqual(self.command("/retention 7"), "Duplicate window: 7 days")
+        self.assertEqual(self.store.setting("action_word"), "Gulag")
+        self.assertEqual(self.store.setting("post_at"), "09:05")
+        self.assertEqual(self.store.setting("retention_days"), "7")
+
+        self.assertEqual(self.command("/actionword off"), "Action word: off")
+        self.assertEqual(self.command("/posttime OFF"), "Daily post: off")
+        self.assertEqual(self.store.setting("action_word"), "off")
+        self.assertEqual(self.store.setting("post_at"), "off")
+
+    def test_a_command_without_an_argument_only_shows_the_value(self) -> None:
+        self.assertEqual(
+            self.command("/actionword", action_word="Nuke"), "Action word: Nuke"
+        )
+        self.assertEqual(self.command("/retention"), "Duplicate window: 5 days")
+        self.assertIsNone(self.store.setting("action_word"))
+        self.assertIsNone(self.store.setting("retention_days"))
+
+    def test_invalid_setting_values_are_refused(self) -> None:
+        for text in ("/posttime 25:00", "/posttime soon", "/retention 0", "/retention -1"):
+            with self.subTest(text=text):
+                self.assertTrue(self.command(text).startswith("Use "))
+        self.assertIsNone(self.store.setting("post_at"))
+        self.assertIsNone(self.store.setting("retention_days"))
+
+    def test_nickname_names_the_sender_or_whoever_they_reply_to(self) -> None:
+        self.assertEqual(self.command("/nickname Ali"), "Alice is now Ali.")
+        bob = {"id": 6, "first_name": "Bob"}
+        self.assertEqual(self.command("/nickname Juan", reply_to=bob), "Bob is now Juan.")
+        self.assertEqual(self.store.nicknames(), {5: "Ali", 6: "Juan"})
+
+        self.assertEqual(
+            self.command("/nickname", reply_to=bob, nicknames={6: "Juan"}),
+            "Bob goes by Juan.",
+        )
+        self.assertEqual(
+            self.command("/nickname off", reply_to=bob), "Bob has no nickname now."
+        )
+        self.assertEqual(self.store.nicknames(), {5: "Ali", 6: ""})
+
+    def test_settings_change_only_in_the_board_group(self) -> None:
+        self.command("/actionword Gulag", chat={"id": OTHER_GROUP, "type": "supergroup"})
+        self.assertEqual(self.client.sent, [])
+        self.assertEqual(
+            self.command("/actionword Gulag", chat={"id": DM, "type": "private"}),
+            "Change settings in the group chat.",
+        )
+        self.assertIsNone(self.store.setting("action_word"))
+
+    def test_line_commands_list_add_and_delete(self) -> None:
+        self.assertEqual(
+            self.command("/lines callout"),
+            "1. Uh oh! Looks like {name}'s being *Sent to {word}*",
+        )
+        self.assertEqual(
+            self.command("/addline callout {name} is off to {word}"),
+            "Added to callout: {name} is off to {word}",
+        )
+        self.assertEqual(
+            self.command("/delline callout 1"),
+            "Deleted from callout: Uh oh! Looks like {name}'s being *Sent to {word}*",
+        )
+        self.assertEqual(self.store.message_lines("callout"), ["{name} is off to {word}"])
+        self.assertTrue(self.command("/delline callout 1").startswith("That's the last"))
+        self.assertTrue(self.command("/addline CHAD-group nice").startswith("Added"))
+        self.assertEqual(self.store.message_lines("chad-group")[-1], "nice")
+
+    def test_invalid_line_commands_are_refused(self) -> None:
+        for text, reply in (
+            ("/lines", "Name a set"),
+            ("/addline crowd hi", "Name a set"),
+            ("/addline chad", "Add the line"),
+            ("/addline callout {nickname} goes", "A callout line can use only"),
+            ("/delline chad 0", "Use a line number"),
+            ("/delline chad 99", "Use a line number"),
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(self.command(text).startswith(reply))
+        self.assertEqual(
+            self.store.message_lines("callout"),
+            ["Uh oh! Looks like {name}'s being *Sent to {word}*"],
+        )
+
+    def test_personal_lines_take_a_nickname_name_or_username(self) -> None:
+        self.store.remember_member(
+            chat_id=GROUP, user_id=6, seen_at=1, name="Aditya Kumar", username="adi"
+        )
+        self.assertEqual(
+            self.command("/addline chad @Aditya Kumar this one isn't diddyflation!"),
+            "Added to Aditya Kumar's chad lines: this one isn't diddyflation!",
+        )
+        self.assertEqual(
+            self.command("/addline CHAD @ADI hi", chat={"id": DM, "type": "private"}),
+            "Added to Aditya Kumar's chad lines: hi",
+        )
+        self.assertEqual(
+            self.command("/lines chad @Diddy", nicknames={6: "Diddy"}),
+            "1. this one isn't diddyflation!\n2. hi",
+        )
+        self.assertNotIn("hi", self.store.message_lines("chad"))
+        self.assertEqual(
+            self.command("/delline chad @adi 2"), "Deleted from Aditya Kumar's chad lines: hi"
+        )
+        # Someone's own lines may run out, unlike the group's.
+        self.assertTrue(self.command("/delline chad @adi 1").startswith("Deleted"))
+        self.assertEqual(self.command("/lines chad @adi"), "No Aditya Kumar's chad lines yet.")
+
+    def test_the_longest_matching_name_wins(self) -> None:
+        self.store.remember_member(chat_id=GROUP, user_id=6, seen_at=1, name="Ali")
+        self.store.remember_member(chat_id=GROUP, user_id=7, seen_at=1, name="Ali Baba")
+        self.command("/addline chud @Ali Baba open sesame")
+        self.assertEqual(self.store.message_lines("chud:7"), ["open sesame"])
+        self.command("/addline chud @ali Babar the elephant")
+        self.assertEqual(self.store.message_lines("chud:6"), ["Babar the elephant"])
+
+    def test_invalid_personal_line_commands_are_refused(self) -> None:
+        self.store.remember_member(chat_id=GROUP, user_id=6, seen_at=1, name="Sam")
+        self.store.remember_member(chat_id=GROUP, user_id=7, seen_at=1, username="sam")
+        for text, reply in (
+            ("/addline callout @Sam hi", "Only chad and chud lines"),
+            ("/lines chad @nobody", "I don't know who that is"),
+            ("/lines chad @sam", "That name fits more than one person"),
+            ("/delline chud @Alice 1", "Use a line number from /lines chud @name"),
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(self.command(text).startswith(reply))
+
+    def test_names_lists_every_name_a_member_answers_to(self) -> None:
+        self.store.remember_member(
+            chat_id=GROUP, user_id=6, seen_at=1, name="Aditya", username="adi"
+        )
+        self.assertEqual(
+            self.command("/names", nicknames={6: "Diddy"}),
+            "Names to use after @ in /lines, /addline and /delline:\n"
+            "Alice\nDiddy (Aditya, adi)",
+        )
+
+    def test_line_commands_by_dm_need_the_group_roster(self) -> None:
+        self.handle({
+            "chat": {"id": DM, "type": "private"},
+            "message_id": 50, "date": 2_000_000_000,
+            "from": {"id": 9, "first_name": "Stranger"},
+            "text": "/names", "entities": command_entity("/names"),
+        })
+        self.assertEqual(self.client.sent[-1][1], _UNKNOWN_SENDER)
+
+    def test_a_winners_own_lines_join_the_pool(self) -> None:
+        self.store.add_message_line("chad:5", "Nice job Claude!")
+        self.store.add_message_line("chud:5", "this one isn't diddyflation!")
+        for line, pool in (
+            (_chad_line, self.store.message_lines("chad") + self.store.message_lines("chad-solo")),
+            (_chud_line, self.store.message_lines("chud")),
+        ):
+            size = len(pool) + 1
+            # The first day whose variation lands on the pool's last line, the
+            # winner's own.
+            day = next(
+                (date(2033, 1, 1) + timedelta(days=offset)).isoformat()
+                for offset in range(366)
+                if _chad_variation(
+                    GROUP, (date(2033, 1, 1) + timedelta(days=offset)).isoformat()
+                ) % size == size - 1
+            )
+            self.assertIn(line(self.store, GROUP, day, [(5, "Alice")]), (
+                "Nice job Claude!", "this one isn't diddyflation!"
+            ))
+            self.assertIn(line(self.store, GROUP, day, [(6, "Bob")]), pool)
+
+    def test_the_callout_uses_a_line_from_the_set(self) -> None:
+        self.store.add_message_line("callout", "{name}, off to {word} with you")
+        self.store.delete_message_line("callout", 1)
+        share = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": "https://x.com/someone/status/123",
+        }
+        self.handle(share, action_word="Nuke")
+        self.handle({**share, "message_id": 42}, action_word="Nuke")
+        self.assertEqual(self.client.sent[0], (GROUP, "Alice, off to Nuke with you"))
+
+    def test_asterisks_in_a_callout_line_become_bold(self) -> None:
+        share = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 41,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Zoë 🐱"},
+            "text": "https://x.com/someone/status/123",
+        }
+        self.handle(share, action_word="Nuke")
+        for message_id, template, text, entities in (
+            (
+                42,
+                "Uh oh! Looks like {name}'s being *Sent to {word}*",
+                "Uh oh! Looks like Zoë 🐱's being Sent to Nuke",
+                [{"type": "bold", "offset": 33, "length": 12}],
+            ),
+            (
+                43,
+                "**{name}** is *off*",
+                "Zoë 🐱 is off",
+                [
+                    {"type": "bold", "offset": 0, "length": 6},
+                    {"type": "bold", "offset": 10, "length": 3},
+                ],
+            ),
+            (44, "2 * 3 {name}", "2 * 3 Zoë 🐱", []),
+        ):
+            with self.subTest(template=template):
+                self.store.add_message_line("callout", template)
+                self.store.delete_message_line("callout", 1)
+                self.client.sent.clear()
+                self.client.sent_entities.clear()
+                self.handle({**share, "message_id": message_id}, action_word="Nuke")
+                self.assertEqual(self.client.sent[0], (GROUP, text))
+                self.assertEqual(self.client.sent_entities[0], entities)
 
     def test_a_nickname_replaces_the_name_in_the_callout(self) -> None:
         first = {
@@ -266,7 +570,7 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(
             self.client.sent,
             [
-                (GROUP, "Uh oh! Looks like Juan's getting *Sent to Nuke*"),
+                (GROUP, "Uh oh! Looks like Juan's being Sent to Nuke"),
                 (GROUP, "Let's drop a /SendJuanToNuke"),
                 (GROUP, "SF leaderboard\n1. Juan - 🏆🆕 1 SF"),
             ],
@@ -345,7 +649,7 @@ class HandleMessageTests(unittest.TestCase):
         self.handle(share, client=client, action_word="Nuke")
         self.assertEqual(len(client.replies), 1)
         self.assertEqual(
-            client.sent, [(GROUP, "Uh oh! Looks like Bob's getting *Sent to Nuke*")]
+            client.sent, [(GROUP, "Uh oh! Looks like Bob's being Sent to Nuke")]
         )
 
     def test_ambiguous_sf_timeout_does_not_send_a_second_reply(self) -> None:
@@ -619,7 +923,7 @@ class HandleMessageTests(unittest.TestCase):
         )
         chad, chud = self.client.sent[1:3]
         self.assertIn("Alice is the CHAD of the day!", chad[1])
-        self.assertEqual(chud[1], "🚽 Ding ding ding! Bob is the CHUD of the day!")
+        self.assertEqual(chud[1], "🚽 Ding ding ding! Bob is the CHUD of the day!\nCan't add this one to the splitwise!")
         self.client.sent.clear()
 
         # A result that arrives after the post must not revise either winner.
@@ -632,6 +936,11 @@ class HandleMessageTests(unittest.TestCase):
                 "text": "Wordle 4,351 1/6",
             }
         )
+        # Nor may editing the lines change the closing lines already posted.
+        for set_name in ("chad", "chad-solo", "chud"):
+            for _ in self.store.message_lines(set_name):
+                self.store.delete_message_line(set_name, 1)
+            self.store.add_message_line(set_name, "edited")
         ask("/chad@sfbot", chat_id=GROUP)
         ask("/chud")
         self.assertEqual(self.client.sent, [(GROUP, chad[1]), (DM, chud[1])])
@@ -737,7 +1046,7 @@ class HandleMessageTests(unittest.TestCase):
         self.assertTrue(
             chad[1].startswith("👑 Ding ding ding! Juan is the CHAD of the day!\n")
         )
-        self.assertEqual(chud[1], "🚽 Ding ding ding! Diddy is the CHUD of the day!")
+        self.assertEqual(chud[1], "🚽 Ding ding ding! Diddy is the CHUD of the day!\nCan't add this one to the splitwise!")
 
     def test_an_announcement_from_an_older_build_still_follows_a_nickname(self) -> None:
         # A day posted before winners were recorded leaves only its message,
@@ -806,7 +1115,7 @@ class HandleMessageTests(unittest.TestCase):
         self.assertTrue(
             chad[1].startswith("👑 Ding ding ding! Alice is the CHAD of the day!\n")
         )
-        self.assertEqual(chud[1], "🚽 Ding ding ding! Bob is the CHUD of the day!")
+        self.assertEqual(chud[1], "🚽 Ding ding ding! Bob is the CHUD of the day!\nCan't add this one to the splitwise!")
 
     def ask_both(
         self, date: int, nicknames: dict[int, str] | None = None
@@ -825,6 +1134,23 @@ class HandleMessageTests(unittest.TestCase):
                 },
                 nicknames={5: "Juan", 6: "Diddy"} if nicknames is None else nicknames,
             )
+
+    def test_score_system_explains_every_game_in_any_chat(self) -> None:
+        for chat_id, chat_type in ((DM, "private"), (OTHER_GROUP, "supergroup")):
+            self.handle(
+                {
+                    "chat": {"id": chat_id, "type": chat_type},
+                    "message_id": 8,
+                    "date": 2_000_000_100,
+                    "from": {"id": 9, "first_name": "Stranger"},
+                    "text": "/scoresystem",
+                    "entities": command_entity("/scoresystem"),
+                }
+            )
+        self.assertEqual([chat for chat, _ in self.client.sent], [DM, OTHER_GROUP])
+        text = self.client.sent[0][1]
+        for heading in ("average placing", "Wordle:", "Connections:", "Krillion:", "Fermi:"):
+            self.assertIn(heading, text)
 
     def test_games_command_links_every_supported_game(self) -> None:
         for chat_id, chat_type, command in (
@@ -1107,6 +1433,49 @@ class RunPollingTests(unittest.TestCase):
         self.assertEqual(self.poll.call_args.kwargs["offset"], 12)
         self.assertEqual(reminders.call_count, 2)
 
+    def test_stored_settings_override_the_environment_without_a_restart(self) -> None:
+        def share(update_id: int, user_id: int, name: str) -> dict:
+            return {
+                "update_id": update_id,
+                "message": {
+                    "chat": {"id": GROUP, "type": "supergroup"},
+                    "message_id": update_id,
+                    "date": 2_000_000_000 + update_id,
+                    "from": {"id": user_id, "first_name": name},
+                    "text": "https://x.com/someone/status/123",
+                },
+            }
+
+        command = {
+            "update_id": 10,
+            "message": {
+                "chat": {"id": GROUP, "type": "supergroup"},
+                "message_id": 10,
+                "date": 2_000_000_000,
+                "from": {"id": 5, "first_name": "Alice"},
+                "text": "/actionword Gulag",
+                "entities": command_entity("/actionword Gulag"),
+            },
+        }
+        self.store.set_nickname(user_id=6, nickname="Juan")
+        self.store.set_setting("post_at", "off")
+        self.store.set_setting("retention_days", "9")
+        self.poll.side_effect = [
+            [command, share(11, 5, "Alice"), share(12, 6, "Bob")], KeyboardInterrupt(),
+        ]
+        with (
+            patch("sfbot.telegram.post_due_leaderboard") as posts,
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            run_polling(
+                self.client, self.cache, self.store,
+                board_chat_id=GROUP, post_minute=21 * 60, action_word="Nuke",
+            )
+
+        self.assertIn((GROUP, "Let's drop a /SendJuanToGulag"), self.client.sent)
+        self.assertEqual(self.cache.retention_seconds, 9 * 24 * 60 * 60)
+        posts.assert_not_called()
+
 
 class TelegramClientTests(unittest.TestCase):
     def test_sf_reply_mentions_a_username(self) -> None:
@@ -1284,13 +1653,7 @@ class PostDueLeaderboardTests(unittest.TestCase):
         self.store.close()
         self.temp_dir.cleanup()
 
-    def post(
-        self,
-        now: int,
-        *,
-        nicknames: dict[int, str] | None = None,
-        absent_chud_user_id: int | None = None,
-    ) -> None:
+    def post(self, now: int, *, nicknames: dict[int, str] | None = None) -> None:
         post_due_leaderboard(
             self.client,  # type: ignore[arg-type]
             self.store,
@@ -1299,7 +1662,6 @@ class PostDueLeaderboardTests(unittest.TestCase):
             post_minute=21 * 60,
             now=now,
             nicknames={} if nicknames is None else nicknames,
-            absent_chud_user_id=absent_chud_user_id,
         )
 
     def test_the_group_is_posted_to_once_per_day(self) -> None:
@@ -1345,66 +1707,11 @@ class PostDueLeaderboardTests(unittest.TestCase):
 
         self.assertEqual(
             self.client.sent[2],
-            (GROUP, "🚽 Ding ding ding! Bob is the CHUD of the day!"),
+            (GROUP, "🚽 Ding ding ding! Bob is the CHUD of the day!\nCan't add this one to the splitwise!"),
         )
         self.assertIn("Alice is the CHAD of the day!", self.client.sent[1][1])
         self.assertNotIn("🔥", self.client.sent[1][1])
         self.assertNotIn("💩", self.client.sent[2][1])
-
-    def test_a_player_who_sat_the_day_out_takes_the_chud_title(self) -> None:
-        for user_id, name, text in (
-            (5, "Alice", "Wordle 4,351 2/6"),
-            (6, "Bob", "Wordle 4,351 5/6"),
-        ):
-            result = parse_result(text)
-            assert result is not None
-            self.store.record(
-                chat_id=GROUP,
-                local_date="2033-05-18",
-                user_id=user_id,
-                display_name=name,
-                result=result,
-                submitted_at=2_000_000_000 + user_id,
-            )
-
-        self.post(2_000_035_800, absent_chud_user_id=8, nicknames={8: "Diddy"})
-
-        # Bob scored worst, but the title goes to whoever played nothing.
-        self.assertEqual(
-            self.client.sent[2],
-            (GROUP, "🚽 Ding ding ding! Diddy is the CHUD of the day!"),
-        )
-        self.assertIn("Alice is the CHAD of the day!", self.client.sent[1][1])
-        self.assertIn("— 🚽 Diddy — played nothing", self.client.sent[3][1])
-        chud = self.store.posted_announcements(
-            chat_id=GROUP, local_date="2033-05-18"
-        )
-        assert chud is not None
-        self.assertEqual(chud[1].winners, ((8, "Diddy"),))
-
-    def test_a_configured_player_who_played_is_judged_on_their_scores(self) -> None:
-        for user_id, name, text in (
-            (5, "Alice", "Wordle 4,351 2/6"),
-            (6, "Bob", "Wordle 4,351 5/6"),
-        ):
-            result = parse_result(text)
-            assert result is not None
-            self.store.record(
-                chat_id=GROUP,
-                local_date="2033-05-18",
-                user_id=user_id,
-                display_name=name,
-                result=result,
-                submitted_at=2_000_000_000 + user_id,
-            )
-
-        self.post(2_000_035_800, absent_chud_user_id=5, nicknames={5: "Alice"})
-
-        self.assertEqual(
-            self.client.sent[2],
-            (GROUP, "🚽 Ding ding ding! Bob is the CHUD of the day!"),
-        )
-        self.assertNotIn("played nothing", self.client.sent[3][1])
 
     def test_chad_and_chud_posts_acknowledge_consecutive_titles(self) -> None:
         self.store.mark_posted(
@@ -1496,3 +1803,51 @@ class PostDueLeaderboardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResetDueSeasonTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.store = LeaderboardStore(Path(self.temp_dir.name) / "sfbot.db")
+        self.client = FakeTelegramClient()
+        self.store.mark_posted(chat_id=GROUP, local_date="2033-05-16", chad_winners=[(5, "Alice")])
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.temp_dir.cleanup()
+
+    def reset(self, now: int, *, monthly_reset: bool = True) -> None:
+        reset_due_season(
+            self.client,  # type: ignore[arg-type]
+            self.store,
+            board_chat_id=GROUP,
+            utc_offset_minutes=SGT_OFFSET,
+            monthly_reset=monthly_reset,
+            now=now,
+            nicknames={5: "Juan"},
+        )
+
+    def test_a_new_month_posts_the_final_standings_and_resets(self) -> None:
+        # The first month seen is only recorded, so a first run resets nothing.
+        self.reset(2_000_000_000)
+        self.reset(2_000_000_000)
+        self.assertEqual(self.client.sent, [])
+        self.assertEqual(self.store.setting("season_month"), "2033-05")
+
+        # 2033-06-01 11:33 SGT.
+        self.reset(2_001_209_600)
+        self.reset(2_001_209_600)
+        self.assertEqual(len(self.client.sent), 2)
+        self.assertTrue(self.client.sent[0][1].startswith("Final overall leaderboard\n"))
+        self.assertIn("Juan - 👑 1", self.client.sent[0][1])
+        self.assertEqual(
+            self.client.sent[1][1], "Overall totals reset. Counting from 2033-06-01."
+        )
+        self.assertEqual(self.store.setting("season_start"), "2033-06-01")
+
+    def test_nothing_resets_when_monthly_resets_are_off(self) -> None:
+        self.reset(2_000_000_000)
+        self.reset(2_001_209_600, monthly_reset=False)
+        self.assertEqual(self.client.sent, [])
+        self.assertIsNone(self.store.setting("season_start"))
+        self.assertEqual(self.store.setting("season_month"), "2033-06")
