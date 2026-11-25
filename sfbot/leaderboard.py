@@ -587,9 +587,18 @@ class LeaderboardStore:
         return _decode_daily_ranking(row[0]) if row else None
 
     def title_streaks(
-        self, *, chat_id: int, local_date: str, winners: Sequence[Winner], is_chad: bool
+        self,
+        *,
+        chat_id: int,
+        local_date: str,
+        winners: Sequence[Winner],
+        is_chad: bool,
+        since: str | None = None,
     ) -> dict[int, int]:
-        """Count consecutive calendar days ending with the given winners today."""
+        """Count consecutive calendar days ending with the given winners today.
+
+        A streak counts no posted day before ``since``, the start of the season.
+        """
 
         column = "chad_winners" if is_chad else "chud_winners"
         streaks = {user_id: 1 for user_id, _ in winners}
@@ -598,8 +607,9 @@ class LeaderboardStore:
         with self._lock:
             rows = self._connection.execute(
                 f"SELECT local_date, {column} FROM posted_days "
-                "WHERE chat_id = ? AND local_date < ? ORDER BY local_date DESC",
-                (chat_id, local_date),
+                "WHERE chat_id = ? AND local_date < ? AND local_date >= ? "
+                "ORDER BY local_date DESC",
+                (chat_id, local_date, since or ""),
             )
             for posted_date, raw_winners in rows:
                 if not active or posted_date != expected.isoformat():
@@ -614,20 +624,27 @@ class LeaderboardStore:
         return streaks
 
     def overall_ranking(
-        self, *, chat_id: int, nicknames: Mapping[int, str] | None = None
+        self,
+        *,
+        chat_id: int,
+        nicknames: Mapping[int, str] | None = None,
+        since: str | None = None,
     ) -> list[OverallRank]:
-        """Count saved titles and active streaks through the latest posted day."""
+        """Count saved titles and active streaks through the latest posted day.
+
+        Only posted days from ``since``, the start of the season, are counted.
+        """
 
         with self._lock:
             rows = self._connection.execute(
                 "SELECT local_date, chad_winners, chud_winners FROM posted_days "
-                "WHERE chat_id = ? ORDER BY local_date",
-                (chat_id,),
+                "WHERE chat_id = ? AND local_date >= ? ORDER BY local_date",
+                (chat_id, since or ""),
             ).fetchall()
             names_rows = self._connection.execute(
                 "SELECT user_id, display_name FROM game_results "
-                "WHERE chat_id = ? ORDER BY submitted_at, local_date",
-                (chat_id,),
+                "WHERE chat_id = ? AND local_date >= ? ORDER BY submitted_at, local_date",
+                (chat_id, since or ""),
             ).fetchall()
         names = {int(user_id): str(name) for user_id, name in names_rows}
         counts: dict[int, list[int]] = {user_id: [0, 0] for user_id in names}
@@ -1097,7 +1114,9 @@ def format_daily_ranking(
     return "\n".join(lines)
 
 
-def format_overall_ranking(ranking: Sequence[OverallRank]) -> str:
+def format_overall_ranking(
+    ranking: Sequence[OverallRank], *, heading: str = "Overall leaderboard"
+) -> str:
     if not ranking:
         return "No CHAD or CHUD titles have been recorded yet."
     place_width = len(str(len(ranking)))
@@ -1110,7 +1129,7 @@ def format_overall_ranking(ranking: Sequence[OverallRank]) -> str:
         for streak in (rank.chad_streak, rank.chud_streak)
     )
     lines = [
-        "Overall leaderboard",
+        heading,
         "👑 CHADs  🚽 CHUDs  🔥/💩 streak",
     ]
     place = 0

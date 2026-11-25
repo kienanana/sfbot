@@ -148,6 +148,21 @@ class LeaderboardStoreTests(unittest.TestCase):
         )
         self.assertEqual(self.store.overall_ranking(chat_id=-100)[0].chad_streak, 1)
 
+    def test_overall_and_streaks_count_only_days_from_the_season_start(self) -> None:
+        self.record("Alice", wordle("2/6", 2), user_id=5)
+        for day in ("2033-05-16", "2033-05-17", DAY):
+            self.store.mark_posted(chat_id=-100, local_date=day, chad_winners=[(5, "Alice")])
+        ranks = self.store.overall_ranking(chat_id=-100, since="2033-05-17")
+        self.assertEqual([(r.user_id, r.chads, r.chad_streak) for r in ranks], [(5, 2, 2)])
+        self.assertEqual(self.store.overall_ranking(chat_id=-100, since="2033-05-19"), [])
+        self.assertEqual(
+            self.store.title_streaks(
+                chat_id=-100, local_date=DAY, winners=[(5, "Alice")], is_chad=True,
+                since="2033-05-17",
+            ),
+            {5: 2},
+        )
+
     def test_overall_columns_follow_the_longest_name_and_counts(self) -> None:
         shown = format_overall_ranking([
             OverallRank(1, "Christopher", 12, 0, 3, 0),

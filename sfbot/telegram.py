@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 import zlib
 from collections.abc import Mapping, Sequence
+from datetime import date, timedelta
 from types import MappingProxyType
 from typing import Any
 
@@ -55,6 +56,8 @@ _ACTION_WORD_COMMAND = "/actionword"
 _NICKNAME_COMMAND = "/nickname"
 _POST_TIME_COMMAND = "/posttime"
 _RETENTION_COMMAND = "/retention"
+_MONTHLY_RESET_COMMAND = "/monthlyreset"
+_RESET_OVERALL_COMMAND = "/resetoverall"
 _LINES_COMMAND = "/lines"
 _ADD_LINE_COMMAND = "/addline"
 _DELETE_LINE_COMMAND = "/delline"
@@ -487,7 +490,11 @@ def _with_streaks(
     if message is None:
         return None
     streaks = store.title_streaks(
-        chat_id=board_chat_id, local_date=day, winners=winners, is_chad=is_chad
+        chat_id=board_chat_id,
+        local_date=day,
+        winners=winners,
+        is_chad=is_chad,
+        since=store.setting("season_start"),
     )
     emoji, title = ("🔥", "CHAD") if is_chad else ("💩", "CHUD")
     lines = [
@@ -502,6 +509,10 @@ def _clock(minute: int | None) -> str:
     return _OFF if minute is None else f"{minute // 60:02}:{minute % 60:02}"
 
 
+def _on_off(value: bool) -> str:
+    return "on" if value else _OFF
+
+
 def _change_setting(
     message: Mapping[str, object],
     command: str,
@@ -511,6 +522,7 @@ def _change_setting(
     nicknames: Mapping[int, str],
     post_minute: int | None,
     retention_days: int,
+    monthly_reset: bool,
 ) -> str:
     """Apply a settings command and return the reply describing the result.
 
@@ -526,6 +538,7 @@ def _change_setting(
             f"Action word: {action_word or _OFF}",
             f"Daily post: {_clock(post_minute)}",
             f"Duplicate window: {retention_days} days",
+            f"Monthly /overall reset: {_on_off(monthly_reset)}",
         ]
         lines += [f"Nickname {user_id}: {name}" for user_id, name in nicknames.items()]
         return "\n".join(lines)
@@ -565,6 +578,14 @@ def _change_setting(
                 return "Use HH:MM, for example /posttime 21:00, or off."
             store.set_setting("post_at", _clock(post_minute))
         return f"Daily post: {_clock(post_minute)}"
+
+    if command == _MONTHLY_RESET_COMMAND:
+        if argument:
+            if argument.lower() not in ("on", _OFF):
+                return "Use /monthlyreset on or /monthlyreset off."
+            monthly_reset = argument.lower() == "on"
+            store.set_setting("monthly_reset", _on_off(monthly_reset))
+        return f"Monthly /overall reset: {_on_off(monthly_reset)}"
 
     if argument:
         if not argument.isdigit() or int(argument) == 0:
@@ -626,7 +647,10 @@ def _current_settings(
     post_minute: int | None,
     retention_days: int,
 ) -> dict[str, Any]:
-    """Overlay what the group set by command on the environment's defaults."""
+    """Overlay what the group set by command on the environment's defaults.
+
+    Monthly /overall resets have no environment setting and default to on.
+    """
 
     stored_word = store.setting("action_word")
     if stored_word is not None:
@@ -646,7 +670,53 @@ def _current_settings(
         },
         "post_minute": post_minute,
         "retention_days": retention_days,
+        "monthly_reset": store.setting("monthly_reset") != _OFF,
     }
+
+
+def _overall_heading(since: str | None, *, final: bool = False) -> str:
+    heading = "Final overall leaderboard" if final else "Overall leaderboard"
+    return f"{heading} since {since}" if since else heading
+
+
+def _send_overall(client: TelegramClient, chat_id: int, text: str) -> None:
+    heading, separator, body = text.partition("\n")
+    entities = None
+    if separator:
+        # Telegram needs monospace text for the padded columns to align.
+        entities = [{
+            "type": "pre",
+            "offset": _utf16_length(heading + separator),
+            "length": _utf16_length(body),
+        }]
+    client.send_message(chat_id=chat_id, text=text, entities=entities)
+
+
+def _reset_overall(
+    client: TelegramClient,
+    store: LeaderboardStore,
+    *,
+    board_chat_id: int,
+    start: str,
+    nicknames: Mapping[int, str],
+) -> None:
+    """Post the closing season's standings, then count titles from ``start``."""
+
+    since = store.setting("season_start")
+    ranking = store.overall_ranking(
+        chat_id=board_chat_id, nicknames=nicknames, since=since
+    )
+    # Everyone who played is ranked, so an empty season still has rows.
+    if any(rank.chads or rank.chuds for rank in ranking):
+        _send_overall(
+            client,
+            board_chat_id,
+            format_overall_ranking(ranking, heading=_overall_heading(since, final=True)),
+        )
+    store.set_setting("season_start", start)
+    client.send_message(
+        chat_id=board_chat_id, text=f"Overall totals reset. Counting from {start}."
+    )
 
 
 def handle_message(
@@ -661,6 +731,7 @@ def handle_message(
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
     post_minute: int | None = None,
     retention_days: int = 5,
+    monthly_reset: bool = True,
 ) -> None:
     chat = message.get("chat")
     if not isinstance(chat, Mapping) or not isinstance(chat.get("id"), int):
@@ -710,6 +781,8 @@ def handle_message(
         _NICKNAME_COMMAND,
         _POST_TIME_COMMAND,
         _RETENTION_COMMAND,
+        _MONTHLY_RESET_COMMAND,
+        _RESET_OVERALL_COMMAND,
         _LINES_COMMAND,
         _ADD_LINE_COMMAND,
         _DELETE_LINE_COMMAND,
@@ -721,6 +794,15 @@ def handle_message(
             if is_board_group:
                 text = _edit_lines(message, command, store=store)
                 client.send_message(chat_id=chat_id, text=text)
+        elif command == _RESET_OVERALL_COMMAND:
+            if is_board_group:
+                # A day already posted stays in the season it was posted in.
+                day = local_date(seen_at, utc_offset_minutes=utc_offset_minutes)
+                if store.posted_announcements(chat_id=chat_id, local_date=day):
+                    day = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
+                _reset_overall(
+                    client, store, board_chat_id=chat_id, start=day, nicknames=nicknames
+                )
         elif is_board_group:
             text = _change_setting(
                 message,
@@ -730,6 +812,7 @@ def handle_message(
                 nicknames=nicknames,
                 post_minute=post_minute,
                 retention_days=retention_days,
+                monthly_reset=monthly_reset,
             )
             client.send_message(chat_id=chat_id, text=text)
         return
@@ -772,21 +855,14 @@ def handle_message(
             return
 
         if command == _OVERALL_COMMAND:
-            ranking = store.overall_ranking(chat_id=board_chat_id, nicknames=nicknames)
-            text = format_overall_ranking(ranking)
-            heading, separator, body = text.partition("\n")
-            entities = None
-            if separator:
-                # Telegram needs monospace text for the padded columns to align.
-                entities = [{
-                    "type": "pre",
-                    "offset": _utf16_length(heading + separator),
-                    "length": _utf16_length(body),
-                }]
-            client.send_message(
-                chat_id=chat_id,
-                text=text,
-                entities=entities,
+            since = store.setting("season_start")
+            ranking = store.overall_ranking(
+                chat_id=board_chat_id, nicknames=nicknames, since=since
+            )
+            _send_overall(
+                client,
+                chat_id,
+                format_overall_ranking(ranking, heading=_overall_heading(since)),
             )
             return
 
@@ -1077,6 +1153,40 @@ def send_due_reminders(
     LOG.info("Sent the %s reminders for chat %s", day, board_chat_id)
 
 
+def reset_due_season(
+    client: TelegramClient,
+    store: LeaderboardStore,
+    *,
+    board_chat_id: int,
+    utc_offset_minutes: int,
+    monthly_reset: bool,
+    now: int | None = None,
+    nicknames: Mapping[int, str] = _NO_NICKNAMES,
+) -> None:
+    """Reset /overall on the first poll of a new month, if monthly resets are on.
+
+    The first month seen is only recorded, so turning this on mid-month, or a
+    first run, keeps the season going until the next month starts.
+    """
+
+    month = local_date(
+        int(time.time()) if now is None else now,
+        utc_offset_minutes=utc_offset_minutes,
+    )[:7]
+    seen = store.setting("season_month")
+    if seen == month:
+        return
+    if seen is not None and monthly_reset:
+        _reset_overall(
+            client,
+            store,
+            board_chat_id=board_chat_id,
+            start=f"{month}-01",
+            nicknames=nicknames,
+        )
+    store.set_setting("season_month", month)
+
+
 def run_polling(
     client: TelegramClient,
     cache: DuplicateCache,
@@ -1112,21 +1222,30 @@ def run_polling(
 
     def run_scheduled_tasks() -> None:
         current = current_settings()
-        if board_chat_id is None or current["post_minute"] is None:
+        if board_chat_id is None:
             return
-        # A failed reminder round must not prevent the daily post, and neither
-        # task may prevent incoming updates from being processed.
-        for name, task in (
-            ("reminders", send_due_reminders),
-            ("leaderboard", post_due_leaderboard),
-        ):
+        tasks: list[tuple[str, Any]] = []
+        if current["post_minute"] is not None:
+            tasks += [
+                ("reminders", send_due_reminders),
+                ("leaderboard", post_due_leaderboard),
+            ]
+        # After any late daily post, so the closing standings include it.
+        tasks.append(("season", reset_due_season))
+        # A failed reminder round must not prevent the daily post, and no task
+        # may prevent incoming updates from being processed.
+        for name, task in tasks:
             options: dict[str, Any] = {
                 "board_chat_id": board_chat_id,
                 "utc_offset_minutes": utc_offset_minutes,
-                "post_minute": current["post_minute"],
             }
-            if name == "leaderboard":
+            if name == "season":
+                options["monthly_reset"] = current["monthly_reset"]
+            else:
+                options["post_minute"] = current["post_minute"]
+            if name in ("leaderboard", "season"):
                 options["nicknames"] = current["nicknames"]
+            if name == "leaderboard":
                 options["absent_chud_user_id"] = absent_chud_user_id
             try:
                 task(client, store, **options)

@@ -11,6 +11,7 @@ from sfbot.telegram import (
     TelegramClient,
     handle_message,
     post_due_leaderboard,
+    reset_due_season,
     send_due_reminders,
     run_polling,
 )
@@ -285,7 +286,40 @@ class HandleMessageTests(unittest.TestCase):
                 retention_days=5,
             ),
             "Action word: Nuke\nDaily post: 21:00\nDuplicate window: 5 days\n"
-            "Nickname 6: Juan",
+            "Monthly /overall reset: on\nNickname 6: Juan",
+        )
+
+    def test_monthly_reset_turns_on_and_off(self) -> None:
+        self.assertEqual(self.command("/monthlyreset OFF"), "Monthly /overall reset: off")
+        self.assertEqual(self.store.setting("monthly_reset"), "off")
+        self.assertTrue(self.command("/monthlyreset maybe").startswith("Use "))
+        self.assertEqual(
+            self.command("/monthlyreset", monthly_reset=False), "Monthly /overall reset: off"
+        )
+        self.assertEqual(self.command("/monthlyreset on"), "Monthly /overall reset: on")
+        self.assertEqual(self.store.setting("monthly_reset"), "on")
+
+    def test_reset_overall_posts_the_final_standings_then_starts_today(self) -> None:
+        self.assertEqual(
+            self.command("/resetoverall"), "Overall totals reset. Counting from 2033-05-18."
+        )
+        self.assertEqual(len(self.client.sent), 1)
+
+        self.store.mark_posted(chat_id=GROUP, local_date="2033-05-16", chad_winners=[(5, "Alice")])
+        self.store.mark_posted(chat_id=GROUP, local_date="2033-05-18", chud_winners=[(6, "Bob")])
+        self.client.sent.clear()
+        # Today is already posted, so it stays in the closing season.
+        self.command("/resetoverall")
+        final = self.client.sent[0][1]
+        self.assertTrue(final.startswith("Final overall leaderboard since 2033-05-18\n"))
+        self.assertNotIn("Alice", final)
+        self.assertIn("Bob - 👑 0  🚽 1", final)
+        self.assertEqual(
+            self.client.sent[1][1], "Overall totals reset. Counting from 2033-05-19."
+        )
+        self.assertEqual(self.store.setting("season_start"), "2033-05-19")
+        self.assertEqual(
+            self.command("/overall"), "No CHAD or CHUD titles have been recorded yet."
         )
 
     def test_setting_commands_store_their_values(self) -> None:
@@ -1732,3 +1766,51 @@ class PostDueLeaderboardTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResetDueSeasonTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.store = LeaderboardStore(Path(self.temp_dir.name) / "sfbot.db")
+        self.client = FakeTelegramClient()
+        self.store.mark_posted(chat_id=GROUP, local_date="2033-05-16", chad_winners=[(5, "Alice")])
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.temp_dir.cleanup()
+
+    def reset(self, now: int, *, monthly_reset: bool = True) -> None:
+        reset_due_season(
+            self.client,  # type: ignore[arg-type]
+            self.store,
+            board_chat_id=GROUP,
+            utc_offset_minutes=SGT_OFFSET,
+            monthly_reset=monthly_reset,
+            now=now,
+            nicknames={5: "Juan"},
+        )
+
+    def test_a_new_month_posts_the_final_standings_and_resets(self) -> None:
+        # The first month seen is only recorded, so a first run resets nothing.
+        self.reset(2_000_000_000)
+        self.reset(2_000_000_000)
+        self.assertEqual(self.client.sent, [])
+        self.assertEqual(self.store.setting("season_month"), "2033-05")
+
+        # 2033-06-01 11:33 SGT.
+        self.reset(2_001_209_600)
+        self.reset(2_001_209_600)
+        self.assertEqual(len(self.client.sent), 2)
+        self.assertTrue(self.client.sent[0][1].startswith("Final overall leaderboard\n"))
+        self.assertIn("Juan - 👑 1", self.client.sent[0][1])
+        self.assertEqual(
+            self.client.sent[1][1], "Overall totals reset. Counting from 2033-06-01."
+        )
+        self.assertEqual(self.store.setting("season_start"), "2033-06-01")
+
+    def test_nothing_resets_when_monthly_resets_are_off(self) -> None:
+        self.reset(2_000_000_000)
+        self.reset(2_001_209_600, monthly_reset=False)
+        self.assertEqual(self.client.sent, [])
+        self.assertIsNone(self.store.setting("season_start"))
+        self.assertEqual(self.store.setting("season_month"), "2033-06")

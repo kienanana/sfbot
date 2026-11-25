@@ -11,7 +11,7 @@ retention window. Deployment checks below remain unverified by local tests.
       the group by command; environment variables become defaults.
 - [x] Vary the repeat-poster callout from a set of lines, and let the group
       list, add, and delete lines in every message set (callout and CHAD).
-- [ ] Reset the `/overall` CHAD and CHUD totals, possibly every month.
+- [x] Reset the `/overall` CHAD and CHUD totals by command and every month.
 - [ ] Revise the placement scoring for the daily games (requirements to gather).
 
 ## P1 — Reliability and result correctness

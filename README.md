@@ -94,10 +94,19 @@ the environment variable, which stays the default until a command sets one.
 | `/nickname Juan` | Set your own nickname, or, as a reply to someone's message, theirs; `off` clears it | `SFBOT_NICKNAMES` |
 | `/posttime 21:30` | Set the daily post time; `off` stops the post and reminders | `SFBOT_LEADERBOARD_AT` |
 | `/retention 7` | Set the duplicate-link window in days | `SFBOT_RETENTION_DAYS` |
+| `/monthlyreset off` | Turn the monthly `/overall` reset `on` or `off` | on |
+| `/resetoverall` | Post the final `/overall` standings, then start the totals again from today | |
 
 Each command without a value shows the current one. In a DM the bot asks you to
 use the group instead; other groups are ignored. Moving the post time after
 today's post has gone out does not post it again.
+
+A reset starts a new season: `/overall` totals and CHAD and CHUD streaks count
+only days from its start. If today's board has already been posted, the new
+season starts tomorrow, so today stays in the closing standings. With monthly
+resets on, the bot resets on the first poll of each month, starting the season
+on the 1st. The first month the bot sees is only recorded, so a fresh install,
+or turning monthly resets on, keeps the current season until the next month.
 
 ### Message sets
 
@@ -333,7 +342,7 @@ player's latest submission that day, unless overridden by a nickname.
 | `/leaderboard` | Current standings, including results submitted after the daily post |
 | `/chad`, `/chud` | The saved announcement for today, or a note that it is not decided yet |
 | `/daily` | Today's saved final ranking and placement scores after the daily post |
-| `/overall` | Each participant's total CHADs and CHUDs, plus 🔥 CHAD or 💩 CHUD streaks only while active |
+| `/overall` | Each participant's total CHADs and CHUDs this season, plus 🔥 CHAD or 💩 CHUD streaks only while active |
 | `/sf` | Lifetime SF counts for the group, separate from the daily games post |
 
 Commands reply where you ask; a DM check stays private. In groups, standings,
