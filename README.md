@@ -65,13 +65,34 @@ SFBOT_LOG_LEVEL=DEBUG make run
 # ... Message from user 123456789 (Bob)
 ```
 
-Anyone without an entry keeps their Telegram name. The bot is restarted for a
-change to take effect. The current nickname also appears for scores submitted
+Anyone without an entry keeps their Telegram name. Nicknames can also be set
+from the group with `/nickname`, which needs no user ID or restart; see
+[Changing settings from the chat](#changing-settings-from-the-chat). A change to
+`SFBOT_NICKNAMES` itself needs a restart. The current nickname also appears for scores submitted
 before the change, and for a CHAD or CHUD announcement repeated after it: the
 winner is stored by user ID, so `/chad` and `/chud` name them the way the bot
 would name them today. A day posted before that was recorded has only the
 message it sent, so the names in it are swapped for nicknames where they still
 belong to one player of that day.
+
+## Changing settings from the chat
+
+Anyone in the leaderboard group can change these settings by command, without
+touching `.env` or restarting the bot. The bot answers in the group, so everyone
+sees the change. A value set this way is stored in the database and wins over
+the environment variable, which stays the default until a command sets one.
+
+| Command | Effect | Default from |
+| --- | --- | --- |
+| `/settings` | Show the current values and nicknames | |
+| `/actionword Gulag` | Set the callout word; `off` sends only the `sf` mention | `SFBOT_ACTION_WORD` |
+| `/nickname Juan` | Set your own nickname, or, as a reply to someone's message, theirs; `off` clears it | `SFBOT_NICKNAMES` |
+| `/posttime 21:30` | Set the daily post time; `off` stops the post and reminders | `SFBOT_LEADERBOARD_AT` |
+| `/retention 7` | Set the duplicate-link window in days | `SFBOT_RETENTION_DAYS` |
+
+Each command without a value shows the current one. In a DM the bot asks you to
+use the group instead; other groups are ignored. Moving the post time after
+today's post has gone out does not post it again.
 
 ## Architecture
 
@@ -89,6 +110,7 @@ flowchart TD
     Z -->|no| C
 
     C{"/games, /leaderboard,<br/>/chad, /chud, /daily,<br/>or /overall?"}
+    C -->|a settings command| SET["board group: store and confirm<br/>DM: point to the group"]
     C -->|/games| D4["send links to all supported games"]
     C -->|/leaderboard| D{"where asked?"}
     C -->|/chad, /chud, /daily, or /overall| D
@@ -355,6 +377,10 @@ not match, and add cases to `tests/test_games.py` from real share text.
 | `SFBOT_ACTION_WORD` | Unset | Word for the repeat-poster callout; unset sends only the `sf` mention |
 | `SFBOT_NICKNAMES` | Unset | `user_id:nickname` pairs, comma separated; overrides Telegram names |
 | `SFBOT_ABSENT_CHUD_USER_ID` | Unset | User ID that takes the CHUD title on any day they submit nothing; unset disables the rule |
+
+`SFBOT_RETENTION_DAYS`, `SFBOT_LEADERBOARD_AT`, `SFBOT_ACTION_WORD`, and
+`SFBOT_NICKNAMES` are only defaults: a value set from the chat overrides them.
+See [Changing settings from the chat](#changing-settings-from-the-chat).
 
 ## Reliability and storage
 

@@ -175,6 +175,24 @@ class LeaderboardStore:
             )
             """
         )
+        # Settings the group changes by command. A missing key falls back to the
+        # environment, so .env stays the default rather than being overwritten.
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) WITHOUT ROWID
+            """
+        )
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS nicknames (
+                user_id INTEGER PRIMARY KEY,
+                nickname TEXT NOT NULL
+            )
+            """
+        )
         self._connection.commit()
 
     def record_sf(
@@ -232,6 +250,38 @@ class LeaderboardStore:
                 "INSERT OR REPLACE INTO announced_versions (chat_id, commit_hash)"
                 " VALUES (?, ?)",
                 (chat_id, commit),
+            )
+
+    def setting(self, key: str) -> str | None:
+        """Return a value set by command, or None to use the environment's."""
+
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            ).fetchone()
+        return None if row is None else str(row[0])
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+
+    def nicknames(self) -> dict[int, str]:
+        """Return nicknames set by command; an empty one clears an .env nickname."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT user_id, nickname FROM nicknames"
+            ).fetchall()
+        return {int(user_id): str(nickname) for user_id, nickname in rows}
+
+    def set_nickname(self, *, user_id: int, nickname: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                "INSERT OR REPLACE INTO nicknames (user_id, nickname) VALUES (?, ?)",
+                (user_id, nickname),
             )
 
     def remember_member(self, *, chat_id: int, user_id: int, seen_at: int) -> None:

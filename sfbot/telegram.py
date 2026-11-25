@@ -36,7 +36,7 @@ from .leaderboard import (
     format_standings,
 )
 from .links import extract_tweet_ids
-from .times import due_post_date, due_reminder_date, local_date
+from .times import due_post_date, due_reminder_date, local_date, parse_daily_time
 
 LOG = logging.getLogger(__name__)
 
@@ -47,6 +47,12 @@ _CHUD_COMMAND = "/chud"
 _DAILY_COMMAND = "/daily"
 _OVERALL_COMMAND = "/overall"
 _SF_COMMAND = "/sf"
+_SETTINGS_COMMAND = "/settings"
+_ACTION_WORD_COMMAND = "/actionword"
+_NICKNAME_COMMAND = "/nickname"
+_POST_TIME_COMMAND = "/posttime"
+_RETENTION_COMMAND = "/retention"
+_OFF = "off"
 _ACKNOWLEDGEMENT = "\N{THUMBS UP SIGN}"
 _UNKNOWN_SENDER = (
     "I don't have you on the group roster yet. Say anything in the group chat,"
@@ -470,6 +476,113 @@ def _with_streaks(
     return message + ("\n" + "\n".join(lines) if lines else "")
 
 
+def _clock(minute: int | None) -> str:
+    return _OFF if minute is None else f"{minute // 60:02}:{minute % 60:02}"
+
+
+def _change_setting(
+    message: Mapping[str, object],
+    command: str,
+    *,
+    store: LeaderboardStore,
+    action_word: str | None,
+    nicknames: Mapping[int, str],
+    post_minute: int | None,
+    retention_days: int,
+) -> str:
+    """Apply a settings command and return the reply describing the result.
+
+    Without an argument a command only shows its current value.
+    """
+
+    parts = _message_body(message).split(maxsplit=1)
+    argument = parts[1].strip() if len(parts) > 1 else ""
+    switch_off = argument.lower() == _OFF
+
+    if command == _SETTINGS_COMMAND:
+        lines = [
+            f"Action word: {action_word or _OFF}",
+            f"Daily post: {_clock(post_minute)}",
+            f"Duplicate window: {retention_days} days",
+        ]
+        lines += [f"Nickname {user_id}: {name}" for user_id, name in nicknames.items()]
+        return "\n".join(lines)
+
+    if command == _ACTION_WORD_COMMAND:
+        if argument:
+            store.set_setting("action_word", _OFF if switch_off else argument)
+            action_word = None if switch_off else argument
+        return f"Action word: {action_word or _OFF}"
+
+    if command == _NICKNAME_COMMAND:
+        # Replying to someone names them; otherwise the sender names themselves.
+        reply = message.get("reply_to_message")
+        target = _sender(reply if isinstance(reply, Mapping) else message, {})
+        if target is None:
+            return "I can't tell whose nickname that is."
+        user_id, telegram_name = target
+        if argument:
+            store.set_nickname(user_id=user_id, nickname="" if switch_off else argument)
+            return (
+                f"{telegram_name} has no nickname now."
+                if switch_off
+                else f"{telegram_name} is now {argument}."
+            )
+        nickname = nicknames.get(user_id)
+        return (
+            f"{telegram_name} goes by {nickname}."
+            if nickname
+            else f"{telegram_name} has no nickname."
+        )
+
+    if command == _POST_TIME_COMMAND:
+        if argument:
+            try:
+                post_minute = None if switch_off else parse_daily_time(argument)
+            except ValueError:
+                return "Use HH:MM, for example /posttime 21:00, or off."
+            store.set_setting("post_at", _clock(post_minute))
+        return f"Daily post: {_clock(post_minute)}"
+
+    if argument:
+        if not argument.isdigit() or int(argument) == 0:
+            return "Use a whole number of days, for example /retention 5."
+        retention_days = int(argument)
+        store.set_setting("retention_days", str(retention_days))
+    return f"Duplicate window: {retention_days} days"
+
+
+def _current_settings(
+    store: LeaderboardStore,
+    *,
+    action_word: str | None,
+    nicknames: Mapping[int, str],
+    post_minute: int | None,
+    retention_days: int,
+) -> dict[str, Any]:
+    """Overlay what the group set by command on the environment's defaults."""
+
+    stored_word = store.setting("action_word")
+    if stored_word is not None:
+        action_word = None if stored_word == _OFF else stored_word
+    stored_time = store.setting("post_at")
+    if stored_time is not None:
+        post_minute = None if stored_time == _OFF else parse_daily_time(stored_time)
+    stored_retention = store.setting("retention_days")
+    if stored_retention is not None:
+        retention_days = int(stored_retention)
+    return {
+        "action_word": action_word,
+        "nicknames": {
+            user_id: name
+            for user_id, name in {**nicknames, **store.nicknames()}.items()
+            if name
+        },
+        "post_minute": post_minute,
+        "retention_days": retention_days,
+    }
+
+
 def handle_message(
     message: Mapping[str, object],
     *,
@@ -480,6 +593,8 @@ def handle_message(
     board_chat_id: int | None,
     action_word: str | None = None,
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
+    post_minute: int | None = None,
+    retention_days: int = 5,
 ) -> None:
     chat = message.get("chat")
     if not isinstance(chat, Mapping) or not isinstance(chat.get("id"), int):
@@ -521,6 +636,29 @@ def handle_message(
             client, store, board_chat_id=sf_chat_id,
             to_chat_id=chat_id, nicknames=nicknames,
         )
+        return
+
+    if command in (
+        _SETTINGS_COMMAND,
+        _ACTION_WORD_COMMAND,
+        _NICKNAME_COMMAND,
+        _POST_TIME_COMMAND,
+        _RETENTION_COMMAND,
+    ):
+        # Changes happen in the group only, so everyone sees them.
+        if is_private:
+            client.send_message(chat_id=chat_id, text="Change settings in the group chat.")
+        elif is_board_group:
+            text = _change_setting(
+                message,
+                command,
+                store=store,
+                action_word=action_word,
+                nicknames=nicknames,
+                post_minute=post_minute,
+                retention_days=retention_days,
+            )
+            client.send_message(chat_id=chat_id, text=text)
         return
 
     if command in (
@@ -875,6 +1013,7 @@ def run_polling(
     action_word: str | None = None,
     nicknames: Mapping[int, str] = _NO_NICKNAMES,
     absent_chud_user_id: int | None = None,
+    retention_days: int = 5,
 ) -> None:
     offset: int | None = None
     poll_backoff = 1
@@ -883,8 +1022,21 @@ def run_polling(
         json.JSONDecodeError,
     )
 
+    def current_settings() -> dict[str, Any]:
+        # Read every time, so a command takes effect without a restart.
+        current = _current_settings(
+            store,
+            action_word=action_word,
+            nicknames=nicknames,
+            post_minute=post_minute,
+            retention_days=retention_days,
+        )
+        cache.retention_seconds = current["retention_days"] * 24 * 60 * 60
+        return current
+
     def run_scheduled_tasks() -> None:
-        if board_chat_id is None or post_minute is None:
+        current = current_settings()
+        if board_chat_id is None or current["post_minute"] is None:
             return
         # A failed reminder round must not prevent the daily post, and neither
         # task may prevent incoming updates from being processed.
@@ -895,10 +1047,10 @@ def run_polling(
             options: dict[str, Any] = {
                 "board_chat_id": board_chat_id,
                 "utc_offset_minutes": utc_offset_minutes,
-                "post_minute": post_minute,
+                "post_minute": current["post_minute"],
             }
             if name == "leaderboard":
-                options["nicknames"] = nicknames
+                options["nicknames"] = current["nicknames"]
                 options["absent_chud_user_id"] = absent_chud_user_id
             try:
                 task(client, store, **options)
@@ -941,8 +1093,7 @@ def run_polling(
                             client=client,
                             utc_offset_minutes=utc_offset_minutes,
                             board_chat_id=board_chat_id,
-                            action_word=action_word,
-                            nicknames=nicknames,
+                            **current_settings(),
                         )
                     except request_errors as error:
                         transient = not isinstance(error, TelegramAPIError) or (
