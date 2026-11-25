@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from fractions import Fraction
 from pathlib import Path
 
 from sfbot.games import ParsedResult
@@ -11,7 +12,6 @@ from sfbot.leaderboard import (
     LeaderboardStore,
     OverallRank,
     PostedAnnouncement,
-    absent_chud_winners,
     apply_nicknames,
     chad_winners,
     chud_winners,
@@ -73,8 +73,9 @@ class LeaderboardStoreTests(unittest.TestCase):
         for game in ("Fermi", "Krillion"):
             self.record("Alex", ParsedResult(game, "42", "1", 1), user_id=6)
         boards = self.store.standings(chat_id=-100, local_date=DAY)
-        from sfbot.leaderboard import _total_placings
-        self.assertEqual(_total_placings(boards), {5: 5, 6: 4})
+        from sfbot.leaderboard import _day_scores
+        # One game at first place plus two skips, against three games averaging 4/3.
+        self.assertEqual(_day_scores(boards), {5: 2, 6: Fraction(4, 3)})
         self.assertIn("Alex is the CHAD", format_chad(boards))
         self.assertIn("Alex is the CHUD", format_chud(boards))
 
@@ -86,14 +87,14 @@ class LeaderboardStoreTests(unittest.TestCase):
         boards = self.store.standings(chat_id=-100, local_date=DAY)
         ranks = daily_ranking(boards)
         self.assertEqual([(rank.user_id, rank.points) for rank in ranks],
-                         [(5, 2), (6, 4), (7, 4)])
+                         [(5, 1), (6, 2.5), (7, 2.5)])
         shown = format_daily_ranking(
             ranks, local_date=DAY, chads=chad_winners(boards),
             chuds=chud_winners(boards), nicknames={5: "Juan"},
         )
-        self.assertIn("1. 👑 Juan — 2 points", shown)
-        self.assertIn("2. 🚽 Bob — 4 points", shown)
-        self.assertIn("2. 🚽 Cara — 4 points", shown)
+        self.assertIn("1. 👑 Juan — 1 point", shown)
+        self.assertIn("2. 🚽 Bob — 2.5 points", shown)
+        self.assertIn("2. 🚽 Cara — 2.5 points", shown)
 
     def test_posted_ranking_survives_reopen_and_late_results(self) -> None:
         self.store.mark_posted(
@@ -465,20 +466,6 @@ class LeaderboardStoreTests(unittest.TestCase):
         self.store.remember_member(chat_id=-100, user_id=5, seen_at=2_000_000_000)
         self.assertFalse(self.store.is_member(chat_id=-200, user_id=5))
 
-    def test_the_latest_name_a_player_submitted_under_is_returned(self) -> None:
-        self.assertIsNone(self.store.latest_name(chat_id=-100, user_id=5))
-
-        self.record("Alice", wordle("3/6", 3), user_id=5, submitted_at=2_000_000_000)
-        self.record(
-            "Ali",
-            ParsedResult("Fermi", "42", "1", 1),
-            user_id=5,
-            submitted_at=2_000_000_500,
-        )
-
-        self.assertEqual(self.store.latest_name(chat_id=-100, user_id=5), "Ali")
-        self.assertIsNone(self.store.latest_name(chat_id=-100, user_id=9))
-
 
 class FormatStandingsTests(unittest.TestCase):
     def test_an_empty_day_says_so(self) -> None:
@@ -621,80 +608,6 @@ class FormatChudTests(unittest.TestCase):
             format_chad_winners(chad_winners(boards), variation=3),
             format_chad(boards, variation=3),
         )
-
-
-class AbsentChudTests(unittest.TestCase):
-    """A configured no-show takes the title from whoever scored worst."""
-
-    @staticmethod
-    def board(*names: str) -> GameStandings:
-        return GameStandings(
-            game="Wordle",
-            puzzle_id="42",
-            entries=tuple(
-                Entry(
-                    user_id={"Alice": 1, "Bob": 2}[name],
-                    display_name=name,
-                    score=str(rank),
-                    rank_key=rank,
-                )
-                for rank, name in enumerate(names, start=1)
-            ),
-        )
-
-    def test_nobody_configured_leaves_the_day_to_the_standings(self) -> None:
-        boards = [self.board("Alice", "Bob")]
-
-        self.assertIsNone(absent_chud_winners(boards, user_id=None, name="Diddy"))
-
-    def test_playing_a_single_game_is_enough_to_be_judged_on_it(self) -> None:
-        boards = [self.board("Alice", "Bob"), self.board("Bob")]
-
-        # Alice played one of the two boards, so her total decides her day.
-        self.assertIsNone(absent_chud_winners(boards, user_id=1, name="Diddy"))
-
-    def test_a_day_nobody_played_still_names_them(self) -> None:
-        self.assertEqual(
-            absent_chud_winners([], user_id=4, name="Diddy"), [(4, "Diddy")]
-        )
-
-    def test_submitting_nothing_takes_the_title_from_the_worst_scorer(self) -> None:
-        boards = [self.board("Alice", "Bob")]
-        self.assertEqual(chud_winners(boards), [(2, "Bob")])
-
-        winners = absent_chud_winners(boards, user_id=4, name="Diddy")
-
-        self.assertEqual(winners, [(4, "Diddy")])
-        self.assertEqual(
-            format_chud_winners(winners or []),
-            "🚽 Ding ding ding! Diddy is the CHUD of the day!",
-        )
-
-    def test_the_absent_chud_is_named_after_the_players_who_scored(self) -> None:
-        boards = [self.board("Alice", "Bob")]
-
-        shown = format_daily_ranking(
-            daily_ranking(boards),
-            local_date=DAY,
-            chads=chad_winners(boards),
-            chuds=[(4, "Diddy")],
-        )
-
-        self.assertIn("— 🚽 Diddy — played nothing", shown)
-        self.assertEqual(shown.count("Diddy"), 1)
-
-    def test_a_chud_with_a_placement_total_is_listed_only_in_the_ranking(self) -> None:
-        boards = [self.board("Alice", "Bob")]
-
-        shown = format_daily_ranking(
-            daily_ranking(boards),
-            local_date=DAY,
-            chads=chad_winners(boards),
-            chuds=chud_winners(boards),
-        )
-
-        self.assertIn("2. 🚽 Bob — 2 points", shown)
-        self.assertNotIn("played nothing", shown)
 
 
 class FormatChadTests(unittest.TestCase):

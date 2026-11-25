@@ -18,7 +18,7 @@ from datetime import date
 # game and a fraction.
 _BLANK = r"[^\S\n]"
 _WORDLE = re.compile(
-    rf"(?im)^{_BLANK}*wordle{_BLANK}+([\d,.]+){_BLANK}+([1-6X])/6\*?{_BLANK}*$"
+    rf"(?im)^{_BLANK}*wordle{_BLANK}+([\d,.]+){_BLANK}+([1-6X])/6(\*?){_BLANK}*$"
 )
 # The header line ends in a shrimp emoji and the dive score is on its own line
 # below it, so both lines are matched together.
@@ -51,9 +51,41 @@ _CONNECTIONS_DIFFICULTY = {"🟨": 0, "🟩": 1, "🟦": 2, "🟪": 3}
 _CONNECTIONS_UNSOLVED_WEIGHT = 0.1
 _CONNECTIONS_ORDER_WEIGHT = 0.005
 
-# Ranks are compared directly, so an unsolved puzzle needs a value that sorts
-# after every solved one.
-_FAILED_RANK = 7
+# How many guesses a max-entropy solver needed in each mode, over every answer
+# and eleven common openers (scripts/wordle_hard_mode.py). Hard mode forces
+# each guess to reuse every revealed hint, which costs guesses and adds fails.
+_WORDLE_GUESSES = {
+    False: {1: 7, 2: 617, 3: 12625, 4: 11414, 5: 785, 6: 17, "X": 0},
+    True: {1: 7, 2: 1023, 3: 11128, 4: 10954, 5: 1948, 6: 321, "X": 84},
+}
+
+
+def _wordle_percentiles(counts: dict[int | str, int]) -> dict[str, float]:
+    """Return each result's mid-percentile: the share of games that did better,
+    plus half the share that did the same. Lower is better."""
+
+    total = sum(counts.values())
+    percentiles: dict[str, float] = {}
+    better = 0
+    for guesses, count in counts.items():
+        percentiles[str(guesses)] = (better + count / 2) / total
+        better += count
+    return percentiles
+
+
+_WORDLE_NORMAL = _wordle_percentiles(_WORDLE_GUESSES[False])
+# A result is ranked against others in its own mode, so a hard-mode 4 lands
+# between a normal 3 and a normal 4. Hard mode also makes lucky 2s more common,
+# which would rank a hard 2 below a normal 2, so a hard result never ranks below
+# the same normal one. A fail is a fail in either mode.
+_WORDLE_RANK = {
+    False: {**_WORDLE_NORMAL, "X": 1.0},
+    True: {
+        guesses: min(percentile, _WORDLE_NORMAL[guesses])
+        for guesses, percentile in _wordle_percentiles(_WORDLE_GUESSES[True]).items()
+    }
+    | {"X": 1.0},
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,11 +109,13 @@ def _parse_wordle(text: str) -> ParsedResult | None:
         return None
 
     guesses = match.group(2).upper()
+    # The share text marks hard mode with an asterisk after the score.
+    hard = bool(match.group(3))
     return ParsedResult(
         game="Wordle",
         puzzle_id=puzzle_id,
-        score=f"{guesses}/6",
-        rank_key=_FAILED_RANK if guesses == "X" else int(guesses),
+        score=f"{guesses}/6{'*' if hard else ''}",
+        rank_key=_WORDLE_RANK[hard][guesses],
     )
 
 

@@ -111,8 +111,8 @@ or turning monthly resets on, keeps the current season until the next month.
 ### Message sets
 
 The callout line and the CHAD and CHUD closing lines are each drawn from a set of lines
-that the group can edit with commands. The same rules apply: anyone in the
-board group can use them, and nobody can from a DM.
+that the group can edit with commands. Anyone in the board group can use them,
+in the group or by DM to the bot; a DM works only for people on the roster.
 
 | Set | Used for |
 | --- | --- |
@@ -127,6 +127,15 @@ board group can use them, and nobody can from a DM.
 | `/lines callout` | List the set's lines, numbered |
 | `/addline callout {name} is off to {word}` | Add a line to the set |
 | `/delline callout 2` | Delete line 2 of the set |
+| `/addline chad @Juan Nice job!` | Add a line to Juan's own CHAD lines |
+| `/lines chud @Juan`, `/delline chud @Juan 1` | List or delete Juan's own CHUD lines |
+| `/names` | List the names each member answers to |
+
+CHAD and CHUD lines can also belong to one person. On a day they win, their own
+lines join the group's in the pool the closing line is drawn from. After `@`,
+use a member's nickname, Telegram name or username, in any case; `/names` lists
+them. A name with spaces is read whole, and a name two people share is refused.
+Someone's own lines start empty and may be deleted down to none.
 
 The bot refuses to delete a set's last line, and refuses callout lines with
 placeholders other than `{name}` and `{word}`. The sets start from the lines in
@@ -196,15 +205,12 @@ TELEGRAM_BOT_TOKEN=replace-with-the-real-token
 SFBOT_LEADERBOARD_CHAT_ID=-1001234567890
 SFBOT_ACTION_WORD=Nuke
 SFBOT_NICKNAMES=123456789:Juan,987654321:Nikki
-SFBOT_ABSENT_CHUD_USER_ID=987654321
 ```
 
 `SFBOT_LEADERBOARD_CHAT_ID` is the group the daily leaderboard posts to; see
 [Finding the group's chat ID](#finding-the-groups-chat-id). Leave it out to run
 link deduplication and `/games` without the leaderboard. `SFBOT_ACTION_WORD` is
 the repeat-poster callout verb; leave it out to send only the `sf` mention.
-`SFBOT_ABSENT_CHUD_USER_ID` gives one player the CHUD title on any day they play
-nothing; see [Sitting a whole day out](#sitting-a-whole-day-out).
 
 `compose.yaml` passes each of these into the container by name, so a new
 variable has to be added there as well as to `.env`.
@@ -328,17 +334,18 @@ has its own emoji, and the player or players in first place get a 👑. Use
 `/games` in either chat for links to all supported games.
 
 Each game and puzzle number has its own board, ordered best first with ties
-sharing a placement and first place crowned 👑. CHAD has the best total placement
-across boards; CHUD has the worst, unless a configured no-show takes it — see
-[Sitting a whole day out](#sitting-a-whole-day-out). The `/daily` ranking shows
-this sum for every player, with lower scores better. Missing a board costs one
-place beyond last, and ties share the placement and title. Players are identified
-by user ID, so matching names never combine scores. Display names come from each
-player's latest submission that day, unless overridden by a nickname.
+sharing a placement and first place crowned 👑. A player's day score is their
+average placement over the boards they played, plus 0.5 for each board they
+skipped. CHAD has the best day score and CHUD the worst. The `/daily` ranking
+shows it for every player, with lower scores better, and ties share the placement
+and title. `/scoresystem` explains how each game is ranked. Players are identified by user ID, so
+matching names never combine scores. Display names come from each player's latest submission
+that day, unless overridden by a nickname.
 
 | Command | Response |
 | --- | --- |
 | `/games` | Links to all supported games |
+| `/scoresystem` | How the day score and each game's ranking work, and why |
 | `/leaderboard` | Current standings, including results submitted after the daily post |
 | `/chad`, `/chud` | The saved announcement for today, or a note that it is not decided yet |
 | `/daily` | Today's saved final ranking and placement scores after the daily post |
@@ -353,22 +360,6 @@ names from the latest submission or configured nickname. Title totals use saved
 winner IDs; older posted days without saved IDs cannot contribute to those
 totals. `/daily` cannot reconstruct a final ranking for a day posted before
 ranking snapshots were saved. A gap in posted calendar days ends a streak.
-
-### Sitting a whole day out
-
-`SFBOT_ABSENT_CHUD_USER_ID` names one player who takes the CHUD title outright on
-any local day they submit nothing at all, however badly everyone else did:
-
-```dotenv
-SFBOT_ABSENT_CHUD_USER_ID=987654321
-```
-
-One result of any game that day hands the title back to the usual worst total
-placement, so a single attempt is always enough to be judged on. The title is
-saved like any other, which is what lets `/chud`, `/overall`, and the CHUD streak
-account for it, and the day's `/daily` ranking names them after the players who
-scored, marked as having played nothing rather than given a placement they never
-earned. Unset disables the rule.
 
 ### Finding the group's chat ID
 
@@ -416,7 +407,6 @@ not match, and add cases to `tests/test_games.py` from real share text.
 | `SFBOT_LEADERBOARD_AT` | `21:00` | Local time of the daily post; `off` for `/leaderboard` only |
 | `SFBOT_ACTION_WORD` | Unset | Word for the repeat-poster callout; unset sends only the `sf` mention |
 | `SFBOT_NICKNAMES` | Unset | `user_id:nickname` pairs, comma separated; overrides Telegram names |
-| `SFBOT_ABSENT_CHUD_USER_ID` | Unset | User ID that takes the CHUD title on any day they submit nothing; unset disables the rule |
 
 `SFBOT_RETENTION_DAYS`, `SFBOT_LEADERBOARD_AT`, `SFBOT_ACTION_WORD`, and
 `SFBOT_NICKNAMES` are only defaults: a value set from the chat overrides them.

@@ -9,6 +9,7 @@ import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
+from fractions import Fraction
 from itertools import groupby
 from pathlib import Path
 
@@ -48,7 +49,7 @@ class PostedAnnouncement:
 class DailyRank:
     user_id: int
     display_name: str
-    points: int
+    points: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,10 +154,20 @@ class LeaderboardStore:
                 chat_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
                 seen_at INTEGER NOT NULL,
+                name TEXT,
+                username TEXT,
                 PRIMARY KEY (chat_id, user_id)
             ) WITHOUT ROWID
             """
         )
+        member_columns = {
+            row[1] for row in self._connection.execute("PRAGMA table_info(group_members)")
+        }
+        for column in ("name", "username"):
+            if column not in member_columns:
+                self._connection.execute(
+                    f"ALTER TABLE group_members ADD COLUMN {column} TEXT"
+                )
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS sf_events (
@@ -338,18 +349,42 @@ class LeaderboardStore:
                 (set_name, number - 1),
             )
 
-    def remember_member(self, *, chat_id: int, user_id: int, seen_at: int) -> None:
-        """Record that a user was seen in the group, which lets them submit by DM."""
+    def remember_member(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        seen_at: int,
+        name: str | None = None,
+        username: str | None = None,
+    ) -> None:
+        """Record that a user was seen in the group, which lets them submit by DM.
+
+        Their latest Telegram name and username are kept so commands can name them.
+        """
 
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO group_members (chat_id, user_id, seen_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT (chat_id, user_id) DO UPDATE SET seen_at = excluded.seen_at
+                INSERT INTO group_members (chat_id, user_id, seen_at, name, username)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (chat_id, user_id) DO UPDATE SET
+                    seen_at = excluded.seen_at,
+                    name = excluded.name,
+                    username = excluded.username
                 """,
-                (chat_id, user_id, seen_at),
+                (chat_id, user_id, seen_at, name, username),
             )
+
+    def member_names(self, *, chat_id: int) -> dict[int, tuple[str | None, str | None]]:
+        """Return each member's latest Telegram name and username."""
+
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT user_id, name, username FROM group_members WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchall()
+        return {int(user_id): (name, username) for user_id, name, username in rows}
 
     def is_member(self, *, chat_id: int, user_id: int) -> bool:
         """Return whether a user has ever been seen in the group."""
@@ -385,18 +420,6 @@ class LeaderboardStore:
         for user_id, game in rows:
             submitted.setdefault(int(user_id), set()).add(str(game))
         return submitted
-
-    def latest_name(self, *, chat_id: int, user_id: int) -> str | None:
-        """Return the name a user last submitted under, or None if they never have."""
-
-        with self._lock:
-            row = self._connection.execute(
-                "SELECT display_name FROM game_results"
-                " WHERE chat_id = ? AND user_id = ?"
-                " ORDER BY submitted_at DESC, local_date DESC LIMIT 1",
-                (chat_id, user_id),
-            ).fetchone()
-        return None if row is None else str(row[0])
 
     def record(
         self,
@@ -749,21 +772,24 @@ def _placings(entries: Sequence[Entry]) -> list[int]:
     return places
 
 
-def _total_placings(standings: Sequence[GameStandings]) -> dict[int, int]:
-    """Sum placements across boards; skipping costs one worse than last place."""
-    totals: dict[int, int] = {}
+# A skipped game costs half a place on top of the average, so playing every
+# game still counts without one missed game deciding the day outright.
+SKIP_PENALTY = Fraction(1, 2)
+
+
+def _day_scores(standings: Sequence[GameStandings]) -> dict[int, Fraction]:
+    """Average each player's placings over the games they played, plus a fixed
+    penalty for each game they skipped. Fractions keep equal scores equal."""
+
+    played: dict[int, list[int]] = {}
     for board in standings:
-        for entry in board.entries:
-            totals.setdefault(entry.user_id, 0)
-    for board in standings:
-        places = _placings(board.entries)
-        skipped = max(places) + 1
-        played = {
-            entry.user_id: place for entry, place in zip(board.entries, places)
-        }
-        for user_id in totals:
-            totals[user_id] += played.get(user_id, skipped)
-    return totals
+        for entry, place in zip(board.entries, _placings(board.entries)):
+            played.setdefault(entry.user_id, []).append(place)
+    return {
+        user_id: Fraction(sum(places), len(places))
+        + SKIP_PENALTY * (len(standings) - len(places))
+        for user_id, places in played.items()
+    }
 
 
 def _winner_entries(standings: Sequence[GameStandings], *, best: bool) -> list[Entry]:
@@ -772,7 +798,7 @@ def _winner_entries(standings: Sequence[GameStandings], *, best: bool) -> list[E
     Players are identified by user ID independently of their display names.
     """
 
-    totals = _total_placings(standings)
+    totals = _day_scores(standings)
     if not totals:
         return []
 
@@ -802,28 +828,6 @@ def chud_winners(standings: Sequence[GameStandings]) -> list[Winner]:
         (entry.user_id, entry.display_name)
         for entry in _winner_entries(standings, best=False)
     ]
-
-
-def absent_chud_winners(
-    standings: Sequence[GameStandings],
-    *,
-    user_id: int | None,
-    name: str,
-) -> list[Winner] | None:
-    """Return the configured no-show as the sole CHUD, or None to decide normally.
-
-    Sitting out every game of the day reads worse than any score, so whoever is
-    named here takes the title outright on a day they submitted nothing at all.
-    None when nobody is configured, or when they played, which leaves the day to
-    the usual worst-total-placement rule.
-    """
-
-    if user_id is None:
-        return None
-    played = any(
-        entry.user_id == user_id for board in standings for entry in board.entries
-    )
-    return None if played else [(user_id, name)]
 
 
 def _named_winners(names: list[str]) -> str:
@@ -860,6 +864,10 @@ _CHAD_LINES_SINGULAR = (
     "i'm from tel aviv and this is my favourite quizzer!",
 )
 _CHAD_LINES_PLURAL = ("are you guys poly? 👀",)
+
+# CHAD and CHUD lines can also belong to one person, joining the pool on days
+# they win. Their sets are stored as "<set>:<user ID>" and start empty.
+PERSONAL_SETS = ("chad", "chud")
 
 # The sets the group edits by command, with the lines each starts from. A
 # callout line names the repeat poster with {name} and the action word with
@@ -1039,7 +1047,7 @@ def _decode_daily_ranking(raw: object) -> tuple[DailyRank, ...] | None:
         if not isinstance(data, list):
             return None
         return tuple(
-            DailyRank(int(user_id), str(name), int(points))
+            DailyRank(int(user_id), str(name), float(points))
             for user_id, name, points in data
         )
     except (ValueError, TypeError):
@@ -1049,7 +1057,7 @@ def _decode_daily_ranking(raw: object) -> tuple[DailyRank, ...] | None:
 def daily_ranking(standings: Sequence[GameStandings]) -> list[DailyRank]:
     """Rank all participants by the placement total used for CHAD and CHUD."""
 
-    totals = _total_placings(standings)
+    totals = _day_scores(standings)
     names = {
         entry.user_id: entry.display_name
         for board in standings
@@ -1057,7 +1065,7 @@ def daily_ranking(standings: Sequence[GameStandings]) -> list[DailyRank]:
     }
     return sorted(
         (
-            DailyRank(user_id, names[user_id], points)
+            DailyRank(user_id, names[user_id], float(points))
             for user_id, points in totals.items()
         ),
         key=lambda rank: (rank.points, rank.display_name, rank.user_id),
@@ -1072,21 +1080,18 @@ def format_daily_ranking(
     chuds: Sequence[Winner],
     nicknames: Mapping[int, str] | None = None,
 ) -> str:
-    """Show the final placing score, marking everyone tied for either title.
-
-    A title uncoupled from the placement total - a configured no-show taking the
-    CHUD - is named after the ranked players, since it has no place to show.
-    """
+    """Show the final placing score, marking everyone tied for either title."""
 
     lines = [
         f"Final rankings - {local_date}",
-        "Lower is better: sum of game placements; a missed game scores one past last place.",
+        "Lower is better: average placing over the games played, plus 0.5 per game"
+        " skipped. /scoresystem explains the scoring.",
     ]
     chad_ids = {user_id for user_id, _ in chads}
     chud_ids = {user_id for user_id, _ in chuds}
     names = nicknames or {}
     place = 0
-    previous: int | None = None
+    previous: float | None = None
     for index, rank in enumerate(ranking, start=1):
         if rank.points != previous:
             place = index
@@ -1097,20 +1102,8 @@ def format_daily_ranking(
         unit = "point" if rank.points == 1 else "points"
         lines.append(
             f"{place}. {badges}{names.get(rank.user_id, rank.display_name)} "
-            f"— {rank.points} {unit}"
+            f"— {round(rank.points, 2):g} {unit}"
         )
-
-    # A title can be held by someone with no placement total at all, which no
-    # ranking row can show: name them once, after the players who scored.
-    ranked = {rank.user_id for rank in ranking}
-    for user_id, recorded in (*chads, *chuds):
-        if user_id in ranked:
-            continue
-        ranked.add(user_id)
-        badges = ("👑 " if user_id in chad_ids else "") + (
-            "🚽 " if user_id in chud_ids else ""
-        )
-        lines.append(f"— {badges}{names.get(user_id, recorded)} — played nothing")
     return "\n".join(lines)
 
 
