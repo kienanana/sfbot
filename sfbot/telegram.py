@@ -25,6 +25,7 @@ from .leaderboard import (
     GameStandings,
     LeaderboardStore,
     PostedAnnouncement,
+    SeasonArchive,
     Winner,
     apply_nicknames,
     chad_winners,
@@ -51,6 +52,7 @@ _CHAD_COMMAND = "/chad"
 _CHUD_COMMAND = "/chud"
 _DAILY_COMMAND = "/daily"
 _OVERALL_COMMAND = "/overall"
+_SEASONS_COMMAND = "/seasons"
 _SF_COMMAND = "/sf"
 _SETTINGS_COMMAND = "/settings"
 _ACTION_WORD_COMMAND = "/actionword"
@@ -783,9 +785,40 @@ def _current_settings(
     }
 
 
-def _overall_heading(since: str | None, *, final: bool = False) -> str:
-    heading = "Final overall leaderboard" if final else "Overall leaderboard"
-    return f"{heading} since {since}" if since else heading
+def _overall_heading(since: str | None) -> str:
+    return f"Overall leaderboard since {since}" if since else "Overall leaderboard"
+
+
+def _seasons_text(seasons: Sequence[SeasonArchive], *, page: int = 1) -> str:
+    if not seasons:
+        return "No closed seasons have been archived yet."
+    start = (page - 1) * 10
+    if start >= len(seasons):
+        return f"No seasons on page {page}. Use /seasons to start from the newest."
+    lines = [f"📅 Closed seasons (page {page}, newest first):"]
+    for season in seasons[start:start + 10]:
+        through = (date.fromisoformat(season.end_date) - timedelta(days=1)).isoformat()
+        period = (
+            f"{season.start_date} to {through}"
+            if season.start_date else f"before {season.end_date}"
+        )
+        if season.reason == "legacy":
+            period += " (legacy, reconstructed)"
+        ranking = season.ranking
+        if ranking and (ranking[0].chads or ranking[0].chuds):
+            best = (ranking[0].chads, ranking[0].chuds)
+            names = [
+                rank.display_name for rank in ranking
+                if (rank.chads, rank.chuds) == best
+            ]
+            winners = ", ".join(names)
+        else:
+            winners = "no titles"
+        lines.append(f"#{season.id} {period} - {winners}")
+    if start + 10 < len(seasons):
+        lines.append(f"Use /seasons {page + 1} for older seasons.")
+    lines.append("Use /overall <season ID> for the saved final board; /overall last for the newest.")
+    return "\n".join(lines)
 
 
 def _send_overall(client: TelegramClient, chat_id: int, text: str) -> None:
@@ -801,6 +834,27 @@ def _send_overall(client: TelegramClient, chat_id: int, text: str) -> None:
     client.send_message(chat_id=chat_id, text=text, entities=entities)
 
 
+def deliver_pending_seasons(
+    client: TelegramClient, store: LeaderboardStore, *, board_chat_id: int
+) -> None:
+    """Resume confirmed parts of archived season announcements after a failure."""
+
+    for season in store.pending_seasons(chat_id=board_chat_id):
+        if not season.final_sent:
+            _send_overall(client, board_chat_id, season.final_text)
+            store.mark_season_sent(
+                chat_id=board_chat_id, season_id=season.id, part="final_sent"
+            )
+        if not season.notice_sent:
+            client.send_message(
+                chat_id=board_chat_id,
+                text=f"Overall totals reset. Counting from {season.end_date}.",
+            )
+            store.mark_season_sent(
+                chat_id=board_chat_id, season_id=season.id, part="notice_sent"
+            )
+
+
 def _reset_overall(
     client: TelegramClient,
     store: LeaderboardStore,
@@ -808,24 +862,18 @@ def _reset_overall(
     board_chat_id: int,
     start: str,
     nicknames: Mapping[int, str],
-) -> None:
+    reason: str = "manual",
+    month: str | None = None,
+    request_key: str | None = None,
+) -> bool:
     """Post the closing season's standings, then count titles from ``start``."""
 
-    since = store.setting("season_start")
-    ranking = store.overall_ranking(
-        chat_id=board_chat_id, nicknames=nicknames, since=since
+    season = store.close_season(
+        chat_id=board_chat_id, end_date=start, reason=reason,
+        nicknames=nicknames, month=month, request_key=request_key,
     )
-    # Everyone who played is ranked, so an empty season still has rows.
-    if any(rank.chads or rank.chuds for rank in ranking):
-        _send_overall(
-            client,
-            board_chat_id,
-            format_overall_ranking(ranking, heading=_overall_heading(since, final=True)),
-        )
-    store.set_setting("season_start", start)
-    client.send_message(
-        chat_id=board_chat_id, text=f"Overall totals reset. Counting from {start}."
-    )
+    deliver_pending_seasons(client, store, board_chat_id=board_chat_id)
+    return season is not None
 
 
 def handle_message(
@@ -938,9 +986,15 @@ def handle_message(
                 day = local_date(seen_at, utc_offset_minutes=utc_offset_minutes)
                 if store.posted_announcements(chat_id=chat_id, local_date=day):
                     day = (date.fromisoformat(day) + timedelta(days=1)).isoformat()
-                _reset_overall(
-                    client, store, board_chat_id=chat_id, start=day, nicknames=nicknames
+                changed = _reset_overall(
+                    client, store, board_chat_id=chat_id, start=day, nicknames=nicknames,
+                    request_key=f"manual:{message_id}",
                 )
+                if not changed:
+                    client.send_message(
+                        chat_id=chat_id,
+                        text=f"Current season already starts on {store.setting('season_start')}.",
+                    )
         elif is_board_group:
             text = _change_setting(
                 message,
@@ -961,6 +1015,7 @@ def handle_message(
         _CHUD_COMMAND,
         _DAILY_COMMAND,
         _OVERALL_COMMAND,
+        _SEASONS_COMMAND,
     ):
         if board_chat_id is None:
             LOG.warning(
@@ -992,7 +1047,48 @@ def handle_message(
             )
             return
 
+        if command == _SEASONS_COMMAND:
+            arguments = _message_body(message).split(maxsplit=1)
+            page = 1
+            if len(arguments) > 1:
+                requested = arguments[1].strip()
+                if not re.fullmatch(r"[0-9]{1,12}", requested) or int(requested) < 1:
+                    client.send_message(
+                        chat_id=chat_id, text="Use /seasons or /seasons <page number>."
+                    )
+                    return
+                page = int(requested)
+            client.send_message(
+                chat_id=chat_id,
+                text=_seasons_text(store.seasons(chat_id=board_chat_id), page=page),
+            )
+            return
+
         if command == _OVERALL_COMMAND:
+            arguments = _message_body(message).split(maxsplit=1)
+            if len(arguments) > 1:
+                requested = arguments[1].strip().lower()
+                if requested == "last":
+                    seasons = store.seasons(chat_id=board_chat_id)
+                    season = seasons[0] if seasons else None
+                elif re.fullmatch(r"[0-9]{1,12}", requested):
+                    season = store.season(
+                        chat_id=board_chat_id, season_id=int(requested)
+                    )
+                else:
+                    client.send_message(
+                        chat_id=chat_id,
+                        text="Use /overall, /overall last, or /overall <season ID>.",
+                    )
+                    return
+                if season is None:
+                    client.send_message(
+                        chat_id=chat_id,
+                        text="I don't have that season. Use /seasons to list them.",
+                    )
+                    return
+                _send_overall(client, chat_id, season.final_text)
+                return
             since = store.setting("season_start")
             ranking = store.overall_ranking(
                 chat_id=board_chat_id, nicknames=nicknames, since=since
@@ -1296,17 +1392,28 @@ def reset_due_season(
         utc_offset_minutes=utc_offset_minutes,
     )[:7]
     seen = store.setting("season_month")
-    if seen == month:
-        return
-    if seen is not None and monthly_reset:
-        _reset_overall(
-            client,
-            store,
-            board_chat_id=board_chat_id,
-            start=f"{month}-01",
-            nicknames=nicknames,
-        )
-    store.set_setting("season_month", month)
+    if seen is None:
+        store.set_setting("season_month", month)
+    elif seen != month and monthly_reset:
+        boundary = date.fromisoformat(f"{seen}-01")
+        current = date.fromisoformat(f"{month}-01")
+        while boundary < current:
+            boundary = (
+                date(boundary.year + 1, 1, 1)
+                if boundary.month == 12
+                else date(boundary.year, boundary.month + 1, 1)
+            )
+            _reset_overall(
+                client,
+                store,
+                board_chat_id=board_chat_id,
+                start=boundary.isoformat(),
+                nicknames=nicknames,
+                reason="monthly",
+                month=boundary.strftime("%Y-%m"),
+            )
+    elif seen != month:
+        store.set_setting("season_month", month)
 
 
 def run_polling(
@@ -1353,16 +1460,16 @@ def run_polling(
             ]
         # After any late daily post, so the closing standings include it.
         tasks.append(("season", reset_due_season))
+        tasks.append(("season_delivery", deliver_pending_seasons))
         # A failed reminder round must not prevent the daily post, and no task
         # may prevent incoming updates from being processed.
         for name, task in tasks:
-            options: dict[str, Any] = {
-                "board_chat_id": board_chat_id,
-                "utc_offset_minutes": utc_offset_minutes,
-            }
+            options: dict[str, Any] = {"board_chat_id": board_chat_id}
             if name == "season":
+                options["utc_offset_minutes"] = utc_offset_minutes
                 options["monthly_reset"] = current["monthly_reset"]
-            else:
+            elif name != "season_delivery":
+                options["utc_offset_minutes"] = utc_offset_minutes
                 options["post_minute"] = current["post_minute"]
             if name in ("leaderboard", "season"):
                 options["nicknames"] = current["nicknames"]
@@ -1370,6 +1477,11 @@ def run_polling(
                 task(client, store, **options)
             except request_errors as error:
                 LOG.warning("Scheduled task %s failed (%s)", name, error)
+
+    if board_chat_id is not None:
+        store.archive_legacy(
+            chat_id=board_chat_id, nicknames=current_settings()["nicknames"]
+        )
 
     LOG.info("sfbot is listening for messages")
     while True:
