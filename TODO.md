@@ -12,7 +12,7 @@ retention window. Deployment checks below remain unverified by local tests.
 - [x] Vary the repeat-poster callout from a set of lines, and let the group
       list, add, and delete lines in every message set (callout and CHAD).
 - [x] Reset the `/overall` CHAD and CHUD totals by command and every month.
-- [x] Archive final season standings and retrieve them with `/seasons` and `/overall <number>`.
+- [x] Archive final season standings and retrieve them with `/seasons <page number>` and `/overall <season ID>`.
 - [x] Revise the placement scoring for the daily games: average placing plus a skip penalty, hard-mode Wordle, personal lines, `/scoresystem`.
 
 ## P1 — Reliability and result correctness

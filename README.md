@@ -111,10 +111,10 @@ or turning monthly resets on, keeps the current season until the next month.
 Every reset also saves the closing season in SQLite, with its start and end dates,
 the winner IDs and standings, and the exact text of its final board. `/seasons`
 lists closed seasons ten at a time with their first-place players. Use
-`/seasons 2` for older seasons, `/overall <number>` to retrieve a saved final
-board, or `/overall last` for the newest. `/overall` without an argument still
-shows the current season. These
-read commands work in the board group and by DM for members on its roster.
+`/seasons <page number>` for older seasons, `/overall <season ID>` to retrieve a
+saved final board, or `/overall last` for the newest. `/overall` without an
+argument still shows the current season. These read commands work in the board
+group and by DM for members on its roster.
 Names in a saved final board do not change when nicknames change later. A reset
 that closes a season without titles sends the reset notice but no final board;
 the empty season can still be found with `/seasons`.
@@ -369,8 +369,8 @@ that day, unless overridden by a nickname.
 | `/chad`, `/chud` | The saved announcement for today, or a note that it is not decided yet |
 | `/daily` | Today's saved final ranking and placement scores after the daily post |
 | `/overall` | Each participant's total CHADs and CHUDs this season, plus 🔥 CHAD or 💩 CHUD streaks only while active |
-| `/seasons`, `/seasons 2` | Closed seasons, their dates, and first-place players, ten per page |
-| `/overall last`, `/overall <number>` | A saved final board from a closed season |
+| `/seasons`, `/seasons <page number>` | Closed seasons, their dates, and first-place players, ten per page |
+| `/overall last`, `/overall <season ID>` | A saved final board from a closed season |
 | `/sf` | Lifetime SF counts for the group, separate from the daily games post |
 
 Commands reply where you ask; a DM check stays private. In groups, standings,

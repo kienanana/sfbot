@@ -817,7 +817,7 @@ def _seasons_text(seasons: Sequence[SeasonArchive], *, page: int = 1) -> str:
         lines.append(f"#{season.id} {period} - {winners}")
     if start + 10 < len(seasons):
         lines.append(f"Use /seasons {page + 1} for older seasons.")
-    lines.append("Use /overall <number> for the saved final board; /overall last for the newest.")
+    lines.append("Use /overall <season ID> for the saved final board; /overall last for the newest.")
     return "\n".join(lines)
 
 
@@ -1078,7 +1078,7 @@ def handle_message(
                 else:
                     client.send_message(
                         chat_id=chat_id,
-                        text="Use /overall, /overall last, or /overall <season number>.",
+                        text="Use /overall, /overall last, or /overall <season ID>.",
                     )
                     return
                 if season is None:

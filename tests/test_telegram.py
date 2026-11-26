@@ -348,7 +348,7 @@ class HandleMessageTests(unittest.TestCase):
         )
         self.assertEqual(
             self.command("/overall nonsense"),
-            "Use /overall, /overall last, or /overall <season number>.",
+            "Use /overall, /overall last, or /overall <season ID>.",
         )
 
     def test_replayed_reset_command_does_not_create_another_season(self) -> None:
