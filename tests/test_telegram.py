@@ -14,6 +14,7 @@ from sfbot.telegram import (
     _chad_variation,
     _chud_line,
     TelegramClient,
+    deliver_pending_seasons,
     handle_message,
     post_due_leaderboard,
     reset_due_season,
@@ -260,9 +261,10 @@ class HandleMessageTests(unittest.TestCase):
     ) -> str:
         """Send a command from Alice and return the bot's last message."""
 
+        self._command_message_id = getattr(self, "_command_message_id", 49) + 1
         message: dict[str, object] = {
             "chat": chat or {"id": GROUP, "type": "supergroup"},
-            "message_id": 50,
+            "message_id": self._command_message_id,
             "date": 2_000_000_000,
             "from": {"id": 5, "first_name": "Alice"},
             "text": text,
@@ -325,6 +327,60 @@ class HandleMessageTests(unittest.TestCase):
         self.assertEqual(self.store.setting("season_start"), "2033-05-19")
         self.assertEqual(
             self.command("/overall"), "No CHAD or CHUD titles have been recorded yet."
+        )
+
+    def test_closed_seasons_can_be_listed_and_retrieved_with_frozen_names(self) -> None:
+        self.store.mark_posted(
+            chat_id=GROUP, local_date="2033-05-16", chad_winners=[(5, "Alice")]
+        )
+        self.command("/resetoverall", nicknames={5: "Ali"})
+        season = self.store.seasons(chat_id=GROUP)[0]
+        seasons = self.command("/seasons")
+        self.assertTrue(seasons.startswith("📅 Closed seasons"))
+        self.assertIn("#1 before 2033-05-18 - Ali", seasons)
+        self.assertEqual(
+            self.command("/overall last", nicknames={5: "NewName"}), season.final_text
+        )
+        self.assertEqual(self.command(f"/overall {season.id}"), season.final_text)
+        self.assertEqual(
+            self.command("/overall 999"),
+            "I don't have that season. Use /seasons to list them.",
+        )
+        self.assertEqual(
+            self.command("/overall nonsense"),
+            "Use /overall, /overall last, or /overall <season number>.",
+        )
+
+    def test_replayed_reset_command_does_not_create_another_season(self) -> None:
+        message = {
+            "chat": {"id": GROUP, "type": "supergroup"},
+            "message_id": 72,
+            "date": 2_000_000_000,
+            "from": {"id": 5, "first_name": "Alice"},
+            "text": "/resetoverall",
+            "entities": command_entity("/resetoverall"),
+        }
+        self.handle(message)
+        self.handle(message)
+        self.assertEqual(len(self.store.seasons(chat_id=GROUP)), 1)
+        self.assertEqual(
+            [text for _, text in self.client.sent],
+            ["Overall totals reset. Counting from 2033-05-18."],
+        )
+
+    def test_season_list_pages_keep_older_archive_ids_discoverable(self) -> None:
+        for day in range(1, 12):
+            self.store.close_season(
+                chat_id=GROUP, end_date=f"2033-05-{day:02}", reason="manual"
+            )
+        first = self.command("/seasons")
+        self.assertIn("#11 ", first)
+        self.assertIn("Use /seasons 2", first)
+        self.assertNotIn("#1 ", first)
+        self.assertIn("#1 before 2033-05-01", self.command("/seasons 2"))
+        self.assertEqual(
+            self.command("/seasons 0"),
+            "Use /seasons or /seasons <page number>.",
         )
 
     def test_setting_commands_store_their_values(self) -> None:
@@ -1851,3 +1907,68 @@ class ResetDueSeasonTests(unittest.TestCase):
         self.assertEqual(self.client.sent, [])
         self.assertIsNone(self.store.setting("season_start"))
         self.assertEqual(self.store.setting("season_month"), "2033-06")
+
+    def test_late_month_reset_excludes_new_month_from_final_board(self) -> None:
+        self.reset(2_000_000_000)
+        self.store.mark_posted(
+            chat_id=GROUP, local_date="2033-06-01", chad_winners=[(6, "Bob")]
+        )
+        # The first poll in June occurs after June 1's board has already posted.
+        self.reset(2_001_209_600 + 11 * 60 * 60)
+        final = self.client.sent[0][1]
+        self.assertIn("Juan - 👑 1", final)
+        self.assertNotIn("Bob", final)
+        self.assertEqual(
+            [(rank.user_id, rank.chads) for rank in self.store.overall_ranking(
+                chat_id=GROUP, since="2033-06-01"
+            )], [(6, 1)],
+        )
+
+    def test_multiple_missed_months_are_archived_separately(self) -> None:
+        self.reset(2_000_000_000)
+        self.store.mark_posted(
+            chat_id=GROUP, local_date="2033-06-15", chad_winners=[(6, "Bob")]
+        )
+        self.store.mark_posted(
+            chat_id=GROUP, local_date="2033-07-01", chad_winners=[(7, "Cara")]
+        )
+        # June has 30 days; the first poll after May is on July 1.
+        self.reset(2_001_209_600 + 30 * 24 * 60 * 60)
+        seasons = self.store.seasons(chat_id=GROUP)
+        self.assertEqual([season.end_date for season in seasons],
+                         ["2033-07-01", "2033-06-01"])
+        self.assertEqual([rank.user_id for rank in seasons[0].ranking], [6])
+        self.assertEqual([rank.user_id for rank in seasons[1].ranking], [5])
+        self.assertNotIn("Cara", seasons[0].final_text)
+        self.assertEqual(self.store.setting("season_start"), "2033-07-01")
+
+    def test_failed_notice_resumes_without_reposting_the_final_board(self) -> None:
+        self.reset(2_000_000_000)
+
+        class FailNotice(FakeTelegramClient):
+            def send_message(self, *, chat_id, text, entities=None):
+                if text.startswith("Overall totals reset"):
+                    raise TelegramAPIError(403, "rejected")
+                super().send_message(chat_id=chat_id, text=text, entities=entities)
+
+        failing = FailNotice()
+        with self.assertRaises(TelegramAPIError):
+            reset_due_season(
+                failing,  # type: ignore[arg-type]
+                self.store,
+                board_chat_id=GROUP,
+                utc_offset_minutes=SGT_OFFSET,
+                monthly_reset=True,
+                now=2_001_209_600,
+            )
+        season = self.store.seasons(chat_id=GROUP)[0]
+        self.assertTrue(season.final_sent)
+        self.assertFalse(season.notice_sent)
+        self.store.close()
+        self.store = LeaderboardStore(Path(self.temp_dir.name) / "sfbot.db")
+        resumed = FakeTelegramClient()
+        deliver_pending_seasons(resumed, self.store, board_chat_id=GROUP)  # type: ignore[arg-type]
+        self.assertEqual(
+            resumed.sent, [(GROUP, "Overall totals reset. Counting from 2033-06-01.")]
+        )
+        self.assertEqual(self.store.pending_seasons(chat_id=GROUP), [])

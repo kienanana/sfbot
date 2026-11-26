@@ -63,6 +63,18 @@ class OverallRank:
 
 
 @dataclass(frozen=True, slots=True)
+class SeasonArchive:
+    id: int
+    start_date: str | None
+    end_date: str  # exclusive
+    reason: str
+    ranking: tuple[OverallRank, ...]
+    final_text: str
+    final_sent: bool
+    notice_sent: bool
+
+
+@dataclass(frozen=True, slots=True)
 class SFRank:
     user_id: int
     display_name: str
@@ -73,7 +85,8 @@ class LeaderboardStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        # Closing a season reads other store methods inside one transaction.
+        self._lock = threading.RLock()
         self._connection = sqlite3.connect(
             self.path, timeout=10, check_same_thread=False
         )
@@ -203,6 +216,26 @@ class LeaderboardStore:
         )
         self._connection.execute(
             """
+            CREATE TABLE IF NOT EXISTS seasons (
+                id INTEGER PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                start_date TEXT,
+                end_date TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                request_key TEXT NOT NULL,
+                ranking TEXT NOT NULL,
+                final_text TEXT NOT NULL,
+                final_sent INTEGER NOT NULL DEFAULT 0,
+                notice_sent INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (chat_id, request_key)
+            )
+            """
+        )
+        self._connection.execute(
+            "CREATE INDEX IF NOT EXISTS seasons_chat_id ON seasons (chat_id, id DESC)"
+        )
+        self._connection.execute(
+            """
             CREATE TABLE IF NOT EXISTS nicknames (
                 user_id INTEGER PRIMARY KEY,
                 nickname TEXT NOT NULL
@@ -304,6 +337,139 @@ class LeaderboardStore:
             self._connection.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 (key, value),
+            )
+
+    def close_season(
+        self,
+        *,
+        chat_id: int,
+        end_date: str,
+        reason: str,
+        request_key: str | None = None,
+        nicknames: Mapping[int, str] | None = None,
+        month: str | None = None,
+    ) -> SeasonArchive | None:
+        """Freeze the closing board and advance the season in one transaction.
+
+        ``end_date`` is the first day of the next season. ``request_key`` makes
+        a replay of the same reset command return the original archive.
+        """
+
+        date.fromisoformat(end_date)
+        request_key = request_key or f"{reason}:{end_date}"
+        with self._lock, self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            existing = self._connection.execute(
+                "SELECT id FROM seasons WHERE chat_id = ? AND request_key = ?",
+                (chat_id, request_key),
+            ).fetchone()
+            if existing:
+                return self.season(chat_id=chat_id, season_id=int(existing[0]))
+            start_date = self.setting("season_start")
+            if start_date is not None and start_date >= end_date:
+                if month is not None:
+                    self._connection.execute(
+                        "INSERT OR REPLACE INTO settings (key, value) VALUES ('season_month', ?)",
+                        (month,),
+                    )
+                return None
+            ranking = self.overall_ranking(
+                chat_id=chat_id, nicknames=nicknames, since=start_date, before=end_date
+            )
+            heading = "Final overall leaderboard"
+            if start_date is not None:
+                heading += f" since {start_date}"
+            has_titles = any(rank.chads or rank.chuds for rank in ranking)
+            final_text = (
+                format_overall_ranking(ranking, heading=heading)
+                if has_titles else f"{heading}\nNo CHAD or CHUD titles were recorded."
+            )
+            cursor = self._connection.execute(
+                """INSERT INTO seasons
+                   (chat_id, start_date, end_date, reason, request_key, ranking,
+                    final_text, final_sent)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    chat_id, start_date, end_date, reason, request_key,
+                    _encode_overall_ranking(ranking), final_text, int(not has_titles),
+                ),
+            )
+            self._connection.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('season_start', ?)",
+                (end_date,),
+            )
+            if month is not None:
+                self._connection.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES ('season_month', ?)",
+                    (month,),
+                )
+            return self.season(chat_id=chat_id, season_id=cursor.lastrowid)
+
+    def archive_legacy(self, *, chat_id: int, nicknames: Mapping[int, str]) -> None:
+        """Keep pre-archive titles as one labeled period when an old reset exists."""
+
+        with self._lock, self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            if self.setting("season_archive_initialized") is not None:
+                return
+            start_date = self.setting("season_start")
+            if start_date is not None:
+                ranking = self.overall_ranking(
+                    chat_id=chat_id, nicknames=nicknames, before=start_date
+                )
+                if any(rank.chads or rank.chuds for rank in ranking):
+                    self._connection.execute(
+                        """INSERT OR IGNORE INTO seasons
+                           (chat_id, start_date, end_date, reason, request_key,
+                            ranking, final_text, final_sent, notice_sent)
+                           VALUES (?, NULL, ?, 'legacy', ?, ?, ?, 1, 1)""",
+                        (
+                            chat_id, start_date, f"legacy:{start_date}",
+                            _encode_overall_ranking(ranking),
+                            format_overall_ranking(
+                                ranking,
+                                heading=f"Legacy titles before {start_date} (reconstructed)",
+                            ),
+                        ),
+                    )
+            self._connection.execute(
+                """INSERT OR REPLACE INTO settings (key, value)
+                   VALUES ('season_archive_initialized', '1')"""
+            )
+
+    def season(self, *, chat_id: int, season_id: int) -> SeasonArchive | None:
+        with self._lock:
+            row = self._connection.execute(
+                """SELECT id, start_date, end_date, reason, ranking, final_text,
+                          final_sent, notice_sent FROM seasons
+                   WHERE chat_id = ? AND id = ?""",
+                (chat_id, season_id),
+            ).fetchone()
+        return _decode_season(row) if row else None
+
+    def seasons(self, *, chat_id: int) -> list[SeasonArchive]:
+        with self._lock:
+            rows = self._connection.execute(
+                """SELECT id, start_date, end_date, reason, ranking, final_text,
+                          final_sent, notice_sent FROM seasons
+                   WHERE chat_id = ? ORDER BY id DESC""",
+                (chat_id,),
+            ).fetchall()
+        return [_decode_season(row) for row in rows]
+
+    def pending_seasons(self, *, chat_id: int) -> list[SeasonArchive]:
+        return [
+            season for season in reversed(self.seasons(chat_id=chat_id))
+            if not season.final_sent or not season.notice_sent
+        ]
+
+    def mark_season_sent(self, *, chat_id: int, season_id: int, part: str) -> None:
+        if part not in ("final_sent", "notice_sent"):
+            raise ValueError("unknown season message")
+        with self._lock, self._connection:
+            self._connection.execute(
+                f"UPDATE seasons SET {part} = 1 WHERE chat_id = ? AND id = ?",
+                (chat_id, season_id),
             )
 
     def nicknames(self) -> dict[int, str]:
@@ -652,22 +818,27 @@ class LeaderboardStore:
         chat_id: int,
         nicknames: Mapping[int, str] | None = None,
         since: str | None = None,
+        before: str | None = None,
     ) -> list[OverallRank]:
         """Count saved titles and active streaks through the latest posted day.
 
-        Only posted days from ``since``, the start of the season, are counted.
+        Days are counted from ``since`` up to but excluding ``before``.
         """
 
         with self._lock:
             rows = self._connection.execute(
                 "SELECT local_date, chad_winners, chud_winners FROM posted_days "
-                "WHERE chat_id = ? AND local_date >= ? ORDER BY local_date",
-                (chat_id, since or ""),
+                "WHERE chat_id = ? AND local_date >= ? "
+                "AND (? IS NULL OR local_date < ?) "
+                "ORDER BY local_date",
+                (chat_id, since or "", before, before),
             ).fetchall()
             names_rows = self._connection.execute(
                 "SELECT user_id, display_name FROM game_results "
-                "WHERE chat_id = ? AND local_date >= ? ORDER BY submitted_at, local_date",
-                (chat_id, since or ""),
+                "WHERE chat_id = ? AND local_date >= ? "
+                "AND (? IS NULL OR local_date < ?) "
+                "ORDER BY submitted_at, local_date",
+                (chat_id, since or "", before, before),
             ).fetchall()
         names = {int(user_id): str(name) for user_id, name in names_rows}
         counts: dict[int, list[int]] = {user_id: [0, 0] for user_id in names}
@@ -1052,6 +1223,31 @@ def _decode_daily_ranking(raw: object) -> tuple[DailyRank, ...] | None:
         )
     except (ValueError, TypeError):
         return None
+
+
+def _encode_overall_ranking(ranking: Sequence[OverallRank]) -> str:
+    return json.dumps(
+        [
+            [rank.user_id, rank.display_name, rank.chads, rank.chuds,
+             rank.chad_streak, rank.chud_streak]
+            for rank in ranking
+        ],
+        ensure_ascii=False,
+    )
+
+
+def _decode_season(row: tuple[object, ...]) -> SeasonArchive:
+    ranks = json.loads(str(row[4]))
+    return SeasonArchive(
+        id=int(row[0]),
+        start_date=str(row[1]) if row[1] is not None else None,
+        end_date=str(row[2]),
+        reason=str(row[3]),
+        ranking=tuple(OverallRank(*values) for values in ranks),
+        final_text=str(row[5]),
+        final_sent=bool(row[6]),
+        notice_sent=bool(row[7]),
+    )
 
 
 def daily_ranking(standings: Sequence[GameStandings]) -> list[DailyRank]:

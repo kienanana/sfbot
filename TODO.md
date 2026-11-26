@@ -12,6 +12,7 @@ retention window. Deployment checks below remain unverified by local tests.
 - [x] Vary the repeat-poster callout from a set of lines, and let the group
       list, add, and delete lines in every message set (callout and CHAD).
 - [x] Reset the `/overall` CHAD and CHUD totals by command and every month.
+- [x] Archive final season standings and retrieve them with `/seasons` and `/overall <number>`.
 - [x] Revise the placement scoring for the daily games: average placing plus a skip penalty, hard-mode Wordle, personal lines, `/scoresystem`.
 
 ## P1 — Reliability and result correctness
@@ -23,6 +24,9 @@ retention window. Deployment checks below remain unverified by local tests.
       confirmed message on retry or restart. Test failures at each send and
       define how to handle delivery whose response was lost; exactly-once
       delivery cannot be inferred from a timeout.
+- [ ] Resolve ambiguous season-announcement sends: the archive tracks confirmed
+      final boards and notices, but a lost Telegram response can still lead to a
+      duplicate message when the pending part is retried.
 - [ ] Track reminder delivery per recipient so a network failure halfway through
       the roster does not repeat successful DMs. Retry transient API errors
       instead of treating every API failure as an unreachable member.

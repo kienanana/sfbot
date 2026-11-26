@@ -164,6 +164,75 @@ class LeaderboardStoreTests(unittest.TestCase):
             {5: 2},
         )
 
+    def test_closed_season_is_bounded_frozen_and_survives_restart(self) -> None:
+        self.store.set_setting("season_start", "2033-05-01")
+        self.store.mark_posted(
+            chat_id=-100, local_date="2033-05-31", chad_winners=[(5, "Alice")]
+        )
+        self.store.mark_posted(
+            chat_id=-100, local_date="2033-06-01", chad_winners=[(6, "Bob")]
+        )
+        season = self.store.close_season(
+            chat_id=-100, end_date="2033-06-01", reason="monthly",
+            request_key="monthly:2033-06", nicknames={5: "Juan"}, month="2033-06",
+        )
+        self.assertIsNotNone(season)
+        assert season is not None
+        self.assertEqual([(r.user_id, r.chads) for r in season.ranking], [(5, 1)])
+        self.assertIn("Juan - 👑 1", season.final_text)
+        self.assertNotIn("Bob", season.final_text)
+        self.assertEqual(self.store.setting("season_start"), "2033-06-01")
+        self.assertEqual(self.store.setting("season_month"), "2033-06")
+        self.assertEqual(
+            [(r.user_id, r.chads) for r in self.store.overall_ranking(
+                chat_id=-100, since="2033-06-01"
+            )], [(6, 1)],
+        )
+        self.assertEqual(
+            self.store.close_season(
+                chat_id=-100, end_date="2033-06-02", reason="monthly",
+                request_key="monthly:2033-06",
+            ).id, season.id,
+        )
+        self.store.close()
+        self.store = LeaderboardStore(Path(self.temp_dir.name) / "sfbot.db")
+        self.assertEqual(self.store.season(chat_id=-100, season_id=season.id), season)
+        self.assertIsNone(self.store.season(chat_id=-200, season_id=season.id))
+        self.assertEqual(len(self.store.seasons(chat_id=-100)), 1)
+
+    def test_empty_season_skips_only_the_final_board(self) -> None:
+        season = self.store.close_season(
+            chat_id=-100, end_date=DAY, reason="manual"
+        )
+        self.assertIsNotNone(season)
+        assert season is not None
+        self.assertEqual(season.ranking, ())
+        self.assertTrue(season.final_sent)
+        self.assertFalse(season.notice_sent)
+        self.assertEqual(self.store.pending_seasons(chat_id=-100), [season])
+        self.store.mark_season_sent(
+            chat_id=-100, season_id=season.id, part="notice_sent"
+        )
+        self.assertEqual(self.store.pending_seasons(chat_id=-100), [])
+
+    def test_existing_titles_before_a_prior_reset_become_one_legacy_period(self) -> None:
+        self.store.mark_posted(
+            chat_id=-100, local_date="2033-05-01", chad_winners=[(5, "Alice")]
+        )
+        self.store.mark_posted(
+            chat_id=-100, local_date="2033-05-17", chad_winners=[(6, "Bob")]
+        )
+        self.store.set_setting("season_start", "2033-05-17")
+        self.store.archive_legacy(chat_id=-100, nicknames={5: "Ali"})
+        self.store.archive_legacy(chat_id=-100, nicknames={5: "SomeoneElse"})
+        seasons = self.store.seasons(chat_id=-100)
+        self.assertEqual(len(seasons), 1)
+        self.assertEqual(seasons[0].reason, "legacy")
+        self.assertEqual([(r.user_id, r.chads) for r in seasons[0].ranking], [(5, 1)])
+        self.assertIn("Legacy titles before 2033-05-17", seasons[0].final_text)
+        self.assertIn("Ali - 👑 1", seasons[0].final_text)
+        self.assertEqual(self.store.pending_seasons(chat_id=-100), [])
+
     def test_overall_columns_follow_the_longest_name_and_counts(self) -> None:
         shown = format_overall_ranking([
             OverallRank(1, "Christopher", 12, 0, 3, 0),
